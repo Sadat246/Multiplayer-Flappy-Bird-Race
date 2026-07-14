@@ -14,8 +14,8 @@ module Speed_input : sig
     | Accelerate (** right arrow held: ramp toward {!Config.speed_cap} *)
     | Brake (** left arrow held: ramp toward {!Config.speed_floor} *)
     | Coast
-    (** no arrow held: hold current speed (control-scheme decision deferred
-        to the Stage 2 checkpoint) *)
+    (** no arrow held: behavior depends on the control scheme — [Set] holds
+        the current speed, [Hold] relaxes toward {!Config.cruise_speed} *)
   [@@deriving sexp_of, equal]
 end
 
@@ -37,6 +37,13 @@ val flap : t -> t
 
 (** Advance one fixed timestep: apply gravity (clamped to
     {!Config.terminal_velocity}), move by current velocities, ramp [speed]
-    toward what [speed_input] asks. The ceiling clamps rather than kills
-    (classic flappy); collisions are {!World}'s business, not ours. *)
-val step : t -> dt:float -> speed_input:Speed_input.t -> t
+    per [speed_input] and [scheme]. The ceiling clamps rather than kills
+    (classic flappy); collisions are {!World}'s business, not ours. [scheme]
+    is a parameter (rather than read from {!Config}) so tests exercise both;
+    the client passes {!Config.control_scheme}. *)
+val step
+  :  t
+  -> dt:float
+  -> speed_input:Speed_input.t
+  -> scheme:Config.Control_scheme.t
+  -> t

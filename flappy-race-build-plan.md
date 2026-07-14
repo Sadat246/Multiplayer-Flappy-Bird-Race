@@ -68,6 +68,7 @@ Distance counter on the debug overlay so speed is perceivable.
 ## Stage 3 — Seeded course, death, respawn, finish line
 **Build:**
 - Course generation from seed in `lib/game` (pure): N pipe pairs; each gap's vertical center within `gap_max_delta` of the previous, where `gap_max_delta` is derived from max achievable height change between pipes AT `speed_cap` (course must be completable at full speed).
+- **Variable pipe spacing (spec addition):** spacing between pipes NEVER drops below the baseline minimum (never harder), but ~30% of gaps draw from a much wider "breather" range — deliberate easy stretches. Stage 6 places item boxes preferentially in breathers, so grabbing a power-up leaves room to recover.
 - Pipe collision → death: square tumbles (kill upward velocity, fall), 2s dead, respawn at nearest safe x (nearest gap-center with no pipe overlap — course is known, compute it), mid-height, 1.5s invulnerability (blink the square).
 - Ground collision = death too.
 - Finish line at course end; crossing it shows a win screen (Bonsai) + restart key.

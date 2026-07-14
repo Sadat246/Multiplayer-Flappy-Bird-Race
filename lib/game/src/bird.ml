@@ -17,7 +17,7 @@ type t =
 [@@deriving sexp_of, equal]
 
 let initial =
-  { x = 100.
+  { x = Config.bird_start_x
   ; y = (Config.canvas_height -. Config.bird_size) /. 2.
   ; vy = 0.
   ; speed = Config.speed_initial
@@ -26,22 +26,39 @@ let initial =
 
 let flap t = { t with vy = Config.flap_impulse }
 
-(* Move [speed] toward [target] by at most [accel_rate *. dt], without
+(* Move [speed] toward [target] by at most [rate *. dt], without
    overshooting. *)
-let ramp_speed speed ~target ~dt =
-  let max_delta = Config.accel_rate *. dt in
+let ramp_speed speed ~target ~rate ~dt =
+  let max_delta = rate *. dt in
   let delta =
     Float.clamp_exn (target -. speed) ~min:(-.max_delta) ~max:max_delta
   in
   speed +. delta
 ;;
 
-let step t ~dt ~(speed_input : Speed_input.t) =
+let step
+  t
+  ~dt
+  ~(speed_input : Speed_input.t)
+  ~(scheme : Config.Control_scheme.t)
+  =
   let speed =
-    match speed_input with
-    | Accelerate -> ramp_speed t.speed ~target:Config.speed_cap ~dt
-    | Brake -> ramp_speed t.speed ~target:Config.speed_floor ~dt
-    | Coast -> t.speed
+    match speed_input, scheme with
+    | Accelerate, _ ->
+      ramp_speed t.speed ~target:Config.speed_cap ~rate:Config.accel_rate ~dt
+    | Brake, _ ->
+      ramp_speed
+        t.speed
+        ~target:Config.speed_floor
+        ~rate:Config.accel_rate
+        ~dt
+    | Coast, Set -> t.speed
+    | Coast, Hold ->
+      ramp_speed
+        t.speed
+        ~target:Config.cruise_speed
+        ~rate:Config.cruise_decay_rate
+        ~dt
   in
   let vy =
     Float.min (t.vy +. (Config.gravity *. dt)) Config.terminal_velocity

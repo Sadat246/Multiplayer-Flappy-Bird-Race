@@ -1,34 +1,60 @@
-(** The whole single-player game state and its step function: bird physics
-    plus collision against {!Course} and the ground, with a short frozen
-    pause after a crash and then a restart from the beginning.
+(** The whole single-player race and its step function: bird physics,
+    collision against a seeded {!Course}, death → respawn-with-i-frames, and
+    the finish line.
 
     Pure and deterministic — the client's render loop drives it with fixed
-    timesteps and key state; expect tests drive it the same way. *)
+    timesteps and key state; expect tests drive it the same way. In Stage 4
+    this same state machine runs on each client with its own bird; the server
+    never sees any of it (context doc §4). *)
 
 open! Core
 
 module Phase : sig
   type t =
     | Racing
-    | Crashed of { time_left : float }
-    (** Frozen where the crash happened; restarts when it reaches 0. *)
+    | Dead of
+        { time_left : float
+        ; died_at : float (** world x of the death, for the respawn snap *)
+        }
+    (** Tumbling/paused; respawns when [time_left] reaches 0 at the nearest
+        safe x, mid-height, with i-frames. *)
+    | Finished of { time : float (** race time in seconds *) }
   [@@deriving sexp_of, equal]
 end
 
 type t =
   { bird : Bird.t
   ; phase : Phase.t
-  ; crashes : int (** total crashes since page load, for the overlay *)
+  ; invuln_left : float
+  (** seconds of post-respawn invulnerability remaining; 0 = vulnerable.
+      While positive, pipe hits are ignored (ground still kills — you have to
+      dive at it deliberately for 1.5s). *)
+  ; crashes : int (** deaths this race, for the overlay *)
+  ; elapsed : float (** race clock; keeps running while dead *)
+  ; course : Course.t
   }
 [@@deriving sexp_of, equal]
 
-val initial : t
+(** A fresh race on the course generated from [seed]. *)
+val create : seed:int -> t
 
-(** Flap, if racing. Dead birds don't flap. *)
+(** Same course, fresh bird/clock/counters — the result screen's "press R". *)
+val restart : t -> t
+
+(** Flap, if racing. Dead and finished birds don't flap. *)
 val flap : t -> t
 
-(** Advance one fixed timestep. While [Racing]: physics, then collision — any
-    pipe overlap or touching the ground crashes (pauses
-    {!Config.crash_pause}, then restarts from {!Bird.initial}). While
-    [Crashed]: count down only. *)
+(** Advance one fixed timestep.
+
+    [Racing]: physics, then finish-line check, then collision — ground always
+    kills; pipes kill unless invulnerable. Death kills any upward velocity
+    (the tumble IS the physics, context doc §2) and starts the
+    {!Config.respawn_pause} countdown.
+
+    [Dead]: gravity keeps pulling the bird down to the ground (the visible
+    tumble), x frozen; on expiry the bird respawns at
+    {!Course.safe_respawn_x}, mid-height, with {!Config.invuln_duration} of
+    i-frames.
+
+    [Finished]: frozen. *)
 val step : t -> dt:float -> speed_input:Bird.Speed_input.t -> t
