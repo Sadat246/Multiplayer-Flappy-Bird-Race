@@ -95,6 +95,27 @@ let%expect_test "Set scheme: released arrows hold the current speed" =
   [%expect {| true |}]
 ;;
 
+let%expect_test "Drift scheme: decays back to cruise from above, holds below"
+  =
+  let r = Float.round_decimal ~decimal_digits:1 in
+  (* Boost to the cap, release: speed drifts back down to cruise (260). *)
+  let fast =
+    hold Bird.initial ~speed_input:Accelerate ~scheme:Drift ~seconds:1.
+  in
+  let relaxed = hold fast ~speed_input:Coast ~scheme:Drift ~seconds:2. in
+  print_s [%sexp (r fast.speed : float), (r relaxed.speed : float)];
+  (* Brake below cruise, release: speed stays exactly where it was. *)
+  let slow =
+    hold Bird.initial ~speed_input:Brake ~scheme:Drift ~seconds:1.
+  in
+  let held_low = hold slow ~speed_input:Coast ~scheme:Drift ~seconds:2. in
+  print_s [%sexp (r slow.speed : float), (r held_low.speed : float)];
+  [%expect {|
+    (420 260)
+    (190 190)
+    |}]
+;;
+
 let%expect_test "Hold scheme: released arrows decay speed back to cruise" =
   let r = Float.round_decimal ~decimal_digits:1 in
   (* Floor it to the cap, release: speed relaxes to cruise from above. *)
@@ -108,8 +129,8 @@ let%expect_test "Hold scheme: released arrows decay speed back to cruise" =
   let relaxed = hold slow ~speed_input:Coast ~scheme:Hold ~seconds:2. in
   print_s [%sexp (r slow.speed : float), (r relaxed.speed : float)];
   [%expect {|
-    (420 280)
-    (190 280)
+    (420 260)
+    (190 260)
     |}]
 ;;
 

@@ -59,6 +59,17 @@ let step
         ~target:Config.cruise_speed
         ~rate:Config.cruise_decay_rate
         ~dt
+    | Coast, Drift ->
+      (* Asymmetric: above cruise drifts back down (boost is temporary);
+         at/below cruise holds (braking is persistent). *)
+      if Float.( > ) t.speed Config.cruise_speed
+      then
+        ramp_speed
+          t.speed
+          ~target:Config.cruise_speed
+          ~rate:Config.cruise_decay_rate
+          ~dt
+      else t.speed
   in
   let vy =
     Float.min (t.vy +. (Config.gravity *. dt)) Config.terminal_velocity

@@ -37,13 +37,17 @@ val terminal_velocity : float
 (** {2 Horizontal speed control} *)
 
 module Control_scheme : sig
-  (** The two candidate control schemes from the context doc §1 — both are
-      implemented; playtesting picks one (Stage 2 checkpoint). *)
+  (** The candidate control schemes; all implemented, one picked by
+      playtesting (Stage 2 checkpoint). *)
   type t =
     | Hold
     (** arrows are momentary: releasing them decays speed back toward
-        [cruise_speed] at [cruise_decay_rate] *)
+        [cruise_speed] at [cruise_decay_rate], from either side *)
     | Set (** arrows adjust a persistent speed; releasing holds it *)
+    | Drift
+    (** asymmetric hybrid: released above [cruise_speed] decays back down to
+        it (boost is temporary); released at/below holds steady (braking is
+        persistent) *)
   [@@deriving sexp_of, equal]
 end
 
@@ -59,7 +63,8 @@ val speed_cap : float
 (** Speed at race start, between floor and cap. *)
 val speed_initial : float
 
-(** Speed the [Hold] scheme relaxes toward when no arrow is held. *)
+(** Speed that [Hold] (from either side) and [Drift] (from above only) relax
+    toward when no arrow is held. Equal to [speed_initial]. *)
 val cruise_speed : float
 
 (** How fast held arrows move the speed toward floor/cap. Derived from the
@@ -113,8 +118,8 @@ val fairness_margin : float
 
 (** Seed of the FIRST race after page load (fixed until Stage 7, per
     build-plan rule 7, so tuning runs are comparable). Each "new race"
-    advances the seed by one — fresh course per race, still reproducible
-    from the seed shown in the debug overlay. *)
+    advances the seed by one — fresh course per race, still reproducible from
+    the seed shown in the debug overlay. *)
 val debug_seed : int
 
 (** {2 Death, respawn, race flow} *)

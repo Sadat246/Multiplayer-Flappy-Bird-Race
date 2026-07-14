@@ -14,14 +14,15 @@ module Control_scheme = struct
   type t =
     | Hold
     | Set
+    | Drift
   [@@deriving sexp_of, equal]
 end
 
-let control_scheme = Control_scheme.Set
+let control_scheme = Control_scheme.Drift
 let speed_cap = 420.
 let speed_floor = 190.
 let speed_initial = 260.
-let cruise_speed = 280.
+let cruise_speed = speed_initial
 
 (* Full brake-to-floor or floor-to-cap ramp takes (cap - floor) / accel_rate
    ~= 0.4s, per the context doc's "short acceleration ramps". *)

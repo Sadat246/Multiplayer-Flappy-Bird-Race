@@ -15,7 +15,9 @@ module Speed_input : sig
     | Brake (** left arrow held: ramp toward {!Config.speed_floor} *)
     | Coast
     (** no arrow held: behavior depends on the control scheme — [Set] holds
-        the current speed, [Hold] relaxes toward {!Config.cruise_speed} *)
+        the current speed, [Hold] relaxes toward {!Config.cruise_speed} from
+        either side, [Drift] relaxes toward it from above only and holds
+        below *)
   [@@deriving sexp_of, equal]
 end
 
