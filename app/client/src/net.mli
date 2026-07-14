@@ -55,6 +55,10 @@ val ms_since_opponent_update : unit -> int option
 (** One-line connection status for the overlay / lobby screen. *)
 val status_line : unit -> string
 
+(** Both players are in and the race is waiting for someone to press start
+    (ENTER or click). *)
+val ready_to_start : unit -> bool
+
 (** Ask the server to start a fresh race on a new seed (needs both players
     present; errors are surfaced in {!status_line}). *)
 val request_new_race : unit -> unit

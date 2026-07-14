@@ -7,6 +7,7 @@ module Config = Flappy_game.Config
 type status =
   | Connecting
   | Waiting_for_opponent
+  | Ready_to_start
   | In_race
   | Failed of string
 
@@ -53,9 +54,16 @@ let status_line () =
   match !status with
   | Connecting -> "connecting..."
   | Waiting_for_opponent -> "waiting for another player to join..."
+  | Ready_to_start -> "opponent found!"
   | In_race -> "in race"
   | Failed reason ->
     [%string "connection lost: %{reason} - refresh to rejoin"]
+;;
+
+let ready_to_start () =
+  match !status with
+  | Ready_to_start -> true
+  | Connecting | Waiting_for_opponent | In_race | Failed _ -> false
 ;;
 
 let apply_view (view : Protocol.View.t) =
@@ -63,6 +71,9 @@ let apply_view (view : Protocol.View.t) =
    | Waiting_for_players ->
      seed := None;
      status := Waiting_for_opponent
+   | Ready_to_start ->
+     seed := None;
+     status := Ready_to_start
    | Race { seed = s } ->
      (* New race: box ids restart from 0, so in-flight pickup tracking from
         the previous course must not suppress requests. *)

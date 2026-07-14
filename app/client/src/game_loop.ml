@@ -50,6 +50,7 @@ let on_keydown code =
     | "Space" ->
       Option.iter !world ~f:(fun w -> world := Some (World.flap w))
     | "KeyE" -> use_held_item ()
+    | "Enter" -> if Net.ready_to_start () then Net.request_new_race ()
     | "KeyR" ->
       (* Server-arbitrated: a new seed comes back through sync and both
          clients rebuild. Ignored (server-side) unless 2 players. *)
@@ -76,6 +77,11 @@ let install_input_handlers () =
       Js.to_string (Js.Optdef.get ev##.code (fun () -> Js.string ""))
     in
     Hash_set.remove held code;
+    Js._true);
+  (* The lobby's start button is the whole canvas: click to launch. *)
+  Dom_html.document##.onclick
+  := Dom_html.handler (fun (_ : Dom_html.mouseEvent Js.t) ->
+    if Net.ready_to_start () then Net.request_new_race ();
     Js._true)
 ;;
 
@@ -195,13 +201,217 @@ let stroke_rect ctx ~color ~line_width ~x ~y ~w ~h =
   ctx##strokeRect (n x) (n y) (n w) (n h)
 ;;
 
+let seconds s = [%string "%{Float.round_decimal s ~decimal_digits:1#Float}s"]
+
+let fill_path ctx ~color points =
+  ctx##.fillStyle := Js.string color;
+  ctx##beginPath;
+  (match points with
+   | [] -> ()
+   | (x0, y0) :: rest ->
+     ctx##moveTo (n x0) (n y0);
+     List.iter rest ~f:(fun (x, y) -> ctx##lineTo (n x) (n y)));
+  ctx##closePath;
+  ctx##fill
+;;
+
+(* --- The night-sky scene (Stage 8: parallax background). Everything is
+   deterministic from the camera offset — no wall clock, no state. --- *)
+
+let sky_bands =
+  (* Vertical gradient, dark zenith to a lighter horizon. *)
+  [ "#0a0e1a"; "#0d1322"; "#111a2d"; "#161f38"; "#1a2643"; "#1f2c4e" ]
+;;
+
+let wrap_x x = Float.mod_float (Float.mod_float x 1920. +. 1920.) 1920.
+
+let draw_background ctx ~offset =
+  let band_h =
+    Config.canvas_height /. Float.of_int (List.length sky_bands)
+  in
+  List.iteri sky_bands ~f:(fun i color ->
+    fill_rect
+      ctx
+      ~color
+      ~x:0.
+      ~y:(Float.of_int i *. band_h)
+      ~w:Config.canvas_width
+      ~h:(band_h +. 1.));
+  (* Moon: pinned to the sky (infinite distance), with a bite taken out of it
+     for a crescent. *)
+  fill_circle ctx ~color:"#d6d9e0" ~x:830. ~y:80. ~r:26.;
+  fill_circle ctx ~color:"#0d1322" ~x:842. ~y:72. ~r:22.;
+  (* Stars: slow parallax (0.12x), fixed pseudo-random constellation. *)
+  for i = 0 to 69 do
+    (* 31-bit-safe hash: js_of_ocaml ints are 32-bit. *)
+    let h = i * 73856093 land 0xFFFFFF in
+    let x0 = Float.of_int (h % 1920) in
+    let y = Float.of_int (8 + (h / 1920 % 300)) in
+    let sx = wrap_x (x0 -. (offset *. 0.12)) in
+    if Float.( < ) sx Config.canvas_width
+    then (
+      let bright = i % 5 = 0 in
+      fill_rect
+        ctx
+        ~color:(if bright then "#e6edf3" else "#6e7681")
+        ~x:sx
+        ~y
+        ~w:(if bright then 2.5 else 1.5)
+        ~h:(if bright then 2.5 else 1.5))
+  done;
+  (* Rolling hill silhouettes: mid parallax (0.35x). *)
+  let spacing = 330. in
+  let par = offset *. 0.35 in
+  let first = Float.round_down (par /. spacing) in
+  for j = -1 to 4 do
+    let k = first +. Float.of_int j in
+    let cx = (k *. spacing) -. par in
+    let bump = Float.of_int (55 + (Float.to_int k * 7919 % 65)) in
+    fill_circle
+      ctx
+      ~color:"#152030"
+      ~x:(cx +. (spacing /. 2.))
+      ~y:(Course.ground_top +. 150. -. bump)
+      ~r:150.
+  done
+;;
+
+let draw_ground ctx ~offset =
+  fill_rect
+    ctx
+    ~color:"#5c4023"
+    ~x:0.
+    ~y:Course.ground_top
+    ~w:Config.canvas_width
+    ~h:Config.ground_height;
+  (* Grass lip. *)
+  fill_rect
+    ctx
+    ~color:"#2ea043"
+    ~x:0.
+    ~y:Course.ground_top
+    ~w:Config.canvas_width
+    ~h:8.;
+  (* Scrolling dirt flecks so ground speed is readable. *)
+  let par = Float.mod_float (Float.mod_float offset 60. +. 60.) 60. in
+  let x = ref (-.par) in
+  while Float.( < ) !x Config.canvas_width do
+    fill_rect
+      ctx
+      ~color:"#4a3118"
+      ~x:!x
+      ~y:(Course.ground_top +. 22.)
+      ~w:22.
+      ~h:5.;
+    fill_rect
+      ctx
+      ~color:"#6d4d2a"
+      ~x:(!x +. 31.)
+      ~y:(Course.ground_top +. 40.)
+      ~w:14.
+      ~h:4.;
+    x := !x +. 60.
+  done
+;;
+
+(* A pipe segment with body shading and a rimmed cap at the gap-facing end (y
+   = 0 means it hangs from the ceiling, so its cap is at the bottom;
+   otherwise the cap is on top). *)
+let draw_pipe ctx ~sx ~y ~w ~h =
+  let cap_h = Float.min 20. h in
+  let is_top = Float.( <= ) y 0.5 in
+  fill_rect ctx ~color:"#2ea043" ~x:sx ~y ~w ~h;
+  fill_rect ctx ~color:"#56d364" ~x:(sx +. 6.) ~y ~w:8. ~h;
+  fill_rect ctx ~color:"#1f7a33" ~x:(sx +. w -. 14.) ~y ~w:14. ~h;
+  let cap_y = if is_top then y +. h -. cap_h else y in
+  fill_rect
+    ctx
+    ~color:"#38b249"
+    ~x:(sx -. 5.)
+    ~y:cap_y
+    ~w:(w +. 10.)
+    ~h:cap_h;
+  fill_rect ctx ~color:"#56d364" ~x:(sx -. 5.) ~y:cap_y ~w:6. ~h:cap_h;
+  stroke_rect
+    ctx
+    ~color:"#0f3d1a"
+    ~line_width:2.
+    ~x:(sx -. 5.)
+    ~y:cap_y
+    ~w:(w +. 10.)
+    ~h:cap_h
+;;
+
+(* An actual bird (Stage 8): round body, belly, flapping wing, beak and eye —
+   built from primitives on the same 30px collision square (the hitbox never
+   changed, only the feathers). *)
+let draw_bird ctx ~x ~y ~vy ~body ~wing ~belly ~ghost =
+  let cx = x +. (Config.bird_size /. 2.) in
+  let cy = y +. (Config.bird_size /. 2.) in
+  let r = Config.bird_size /. 2. in
+  fill_circle ctx ~color:body ~x:cx ~y:cy ~r;
+  if not ghost
+  then fill_circle ctx ~color:belly ~x:(cx -. 3.) ~y:(cy +. 6.) ~r:(r *. 0.5);
+  (* Wing flaps with vertical motion: raised while rising. *)
+  let wing_tip_y = if Float.( < ) vy (-50.) then cy -. 14. else cy +. 9. in
+  fill_path
+    ctx
+    ~color:wing
+    [ cx -. 14., cy; cx +. 1., wing_tip_y; cx +. 5., cy +. 3. ];
+  (* Beak. *)
+  fill_path
+    ctx
+    ~color:"#f0883e"
+    [ cx +. 11., cy -. 5.; cx +. 24., cy; cx +. 11., cy +. 5. ];
+  (* Eye. *)
+  if not ghost
+  then (
+    fill_circle ctx ~color:"#ffffff" ~x:(cx +. 6.) ~y:(cy -. 6.) ~r:5.;
+    fill_circle ctx ~color:"#0d1117" ~x:(cx +. 8.) ~y:(cy -. 6.) ~r:2.3)
+;;
+
+(* Always-on race stats (the debug overlay stays behind backtick). *)
+let draw_stats ctx (w : World.t) ~ghost_x =
+  fill_rect ctx ~color:"rgba(13, 17, 23, 0.75)" ~x:8. ~y:26. ~w:190. ~h:92.;
+  let place =
+    match ghost_x with
+    | Some gx when Float.( > ) gx w.bird.x -> "2nd", "#f778ba"
+    | Some (_ : float) -> "1st", "#3fb950"
+    | None -> "solo", "#8b949e"
+  in
+  let place_text, place_color = place in
+  fill_text
+    ctx
+    ~color:place_color
+    ~font:"bold 22px monospace"
+    ~x:16.
+    ~y:52.
+    place_text;
+  let progress =
+    Float.round_nearest (100. *. w.bird.x /. w.course.finish_x)
+  in
+  let lines =
+    [ [%string "speed %{Float.round_nearest w.bird.speed#Float} px/s"]
+    ; [%string
+        "pos %{Float.round_nearest w.bird.x#Float}m · %{progress#Float}%"]
+    ; [%string "time %{seconds w.elapsed} · crashes %{w.crashes#Int}"]
+    ]
+  in
+  List.iteri lines ~f:(fun i line ->
+    fill_text
+      ctx
+      ~color:"#e6edf3"
+      ~font:"12px monospace"
+      ~x:16.
+      ~y:(70. +. (Float.of_int i *. 16.))
+      line)
+;;
+
 let with_alpha ctx alpha ~f =
   ctx##.globalAlpha := n alpha;
   f ();
   ctx##.globalAlpha := n 1.0
 ;;
-
-let seconds s = [%string "%{Float.round_decimal s ~decimal_digits:1#Float}s"]
 
 let draw_overlay ctx (w : World.t option) =
   let world_lines =
@@ -246,11 +456,12 @@ let draw_overlay ctx (w : World.t option) =
   in
   ctx##.font := Js.string "12px monospace";
   ctx##.fillStyle := Js.string "#e6edf3";
+  (* Below the always-on stats panel. *)
   List.iteri (world_lines @ net_lines) ~f:(fun i line ->
     ctx##fillText
       (Js.string line)
       (n 8.)
-      (n (26. +. (Float.of_int i *. 14.))))
+      (n (136. +. (Float.of_int i *. 14.))))
 ;;
 
 (* The pre-race countdown: big centered digits, plus GO! at the start. *)
@@ -334,34 +545,60 @@ let draw_win_screen ctx ~time ~crashes =
 ;;
 
 let draw_lobby ctx =
-  fill_rect
+  draw_background ctx ~offset:0.;
+  draw_ground ctx ~offset:0.;
+  (* A decorative bird bobbing on the title screen. *)
+  draw_bird
     ctx
-    ~color:"#0d1117"
-    ~x:0.
-    ~y:0.
-    ~w:Config.canvas_width
-    ~h:Config.canvas_height;
-  fill_rect
-    ctx
-    ~color:"#8b5a2b"
-    ~x:0.
-    ~y:Course.ground_top
-    ~w:Config.canvas_width
-    ~h:Config.ground_height;
+    ~x:(Config.bird_screen_x -. 60.)
+    ~y:170.
+    ~vy:(-100.)
+    ~body:"#f0c649"
+    ~wing:"#d9a62e"
+    ~belly:"#f7e3a1"
+    ~ghost:false;
   fill_text
     ctx
     ~color:"#e6edf3"
-    ~font:"bold 24px monospace"
-    ~x:((Config.canvas_width /. 2.) -. 220.)
-    ~y:((Config.canvas_height /. 2.) -. 10.)
+    ~font:"bold 28px monospace"
+    ~x:((Config.canvas_width /. 2.) -. 210.)
+    ~y:230.
     "MULTIPLAYER FLAPPY RACER";
-  fill_text
-    ctx
-    ~color:"#8b949e"
-    ~font:"16px monospace"
-    ~x:((Config.canvas_width /. 2.) -. 220.)
-    ~y:((Config.canvas_height /. 2.) +. 24.)
-    (Net.status_line ())
+  if Net.ready_to_start ()
+  then (
+    (* The start button (the whole canvas is clickable; ENTER works too). *)
+    let bx = (Config.canvas_width /. 2.) -. 110. in
+    fill_rect ctx ~color:"#238636" ~x:bx ~y:280. ~w:220. ~h:56.;
+    stroke_rect
+      ctx
+      ~color:"#3fb950"
+      ~line_width:2.
+      ~x:bx
+      ~y:280.
+      ~w:220.
+      ~h:56.;
+    fill_text
+      ctx
+      ~color:"#ffffff"
+      ~font:"bold 24px monospace"
+      ~x:(bx +. 38.)
+      ~y:316.
+      "START RACE";
+    fill_text
+      ctx
+      ~color:"#8b949e"
+      ~font:"14px monospace"
+      ~x:(bx -. 20.)
+      ~y:360.
+      "opponent found - click or press ENTER")
+  else
+    fill_text
+      ctx
+      ~color:"#8b949e"
+      ~font:"16px monospace"
+      ~x:((Config.canvas_width /. 2.) -. 220.)
+      ~y:300.
+      (Net.status_line ())
 ;;
 
 (* Flash the bird during i-frames: a ~7 Hz blink driven by the remaining
@@ -475,13 +712,15 @@ let draw_ghost ctx (w : World.t) ~offset =
        && Float.( < ) sx Config.canvas_width
     then
       with_alpha ctx 0.55 ~f:(fun () ->
-        fill_rect
+        draw_bird
           ctx
-          ~color:"#f778ba"
           ~x:sx
           ~y:g.y
-          ~w:Config.bird_size
-          ~h:Config.bird_size)
+          ~vy:100.
+          ~body:"#f778ba"
+          ~wing:"#c9509a"
+          ~belly:"#f7a3d0"
+          ~ghost:true)
     else (
       let ahead = Float.( > ) g.x w.bird.x in
       let ex = if ahead then Config.canvas_width -. 26. else 14. in
@@ -506,26 +745,14 @@ let draw_race ctx (w : World.t) =
   let bird = w.bird in
   (* Camera: bird fixed at [bird_screen_x]; the world slides past. *)
   let offset = bird.x -. Config.bird_screen_x in
-  fill_rect
-    ctx
-    ~color:"#0d1117"
-    ~x:0.
-    ~y:0.
-    ~w:Config.canvas_width
-    ~h:Config.canvas_height;
-  (* Ground. *)
-  fill_rect
-    ctx
-    ~color:"#8b5a2b"
-    ~x:0.
-    ~y:Course.ground_top
-    ~w:Config.canvas_width
-    ~h:Config.ground_height;
+  draw_background ctx ~offset;
+  draw_ground ctx ~offset;
   (* Pipes: only those overlapping the camera window. *)
   List.iter w.course.rects ~f:(fun { Course.Rect.x; y; w = rw; h } ->
     let sx = x -. offset in
-    if Float.( > ) (sx +. rw) 0. && Float.( < ) sx Config.canvas_width
-    then fill_rect ctx ~color:"#3fb950" ~x:sx ~y ~w:rw ~h);
+    if Float.( > ) (sx +. rw +. 6.) 0.
+       && Float.( < ) (sx -. 6.) Config.canvas_width
+    then draw_pipe ctx ~sx ~y ~w:rw ~h);
   (* Item boxes: yellow "?" squares, gone once claimed. *)
   List.iter w.course.item_boxes ~f:(fun box ->
     if not (Set.mem w.boxes_taken box.id)
@@ -568,32 +795,41 @@ let draw_race ctx (w : World.t) =
   (* The opponent first, so our own bird draws on top when overlapping. *)
   draw_ghost ctx w ~offset;
   (* The bird: yellow racing, red dead, blinking during i-frames. *)
-  let color =
+  let body, wing =
     match w.phase with
-    | Countdown _ | Racing | Finished _ -> "#f0c649"
-    | Dead _ -> "#f85149"
+    | Countdown _ | Racing | Finished _ -> "#f0c649", "#d9a62e"
+    | Dead _ -> "#f85149", "#b62324"
   in
   if not (invuln_blink_off ~invuln_left:w.invuln_left)
   then
-    fill_rect
+    draw_bird
       ctx
-      ~color
       ~x:Config.bird_screen_x
       ~y:bird.y
-      ~w:Config.bird_size
-      ~h:Config.bird_size;
-  (* Shield: a ring around the bird while it's up. *)
+      ~vy:bird.vy
+      ~body
+      ~wing
+      ~belly:"#f7e3a1"
+      ~ghost:false;
+  (* Shield: a bubble around the bird while it's up. *)
   if w.shielded
-  then
-    stroke_rect
-      ctx
-      ~color:"#58a6ff"
-      ~line_width:3.
-      ~x:(Config.bird_screen_x -. 5.)
-      ~y:(bird.y -. 5.)
-      ~w:(Config.bird_size +. 10.)
-      ~h:(Config.bird_size +. 10.);
+  then (
+    ctx##.strokeStyle := Js.string "#58a6ff";
+    ctx##.lineWidth := n 3.;
+    ctx##beginPath;
+    ctx##arc
+      (n (Config.bird_screen_x +. (Config.bird_size /. 2.)))
+      (n (bird.y +. (Config.bird_size /. 2.)))
+      (n ((Config.bird_size /. 2.) +. 8.))
+      (n 0.)
+      (n (2. *. Float.pi))
+      Js._false;
+    ctx##stroke);
   draw_progress_bar ctx w;
+  draw_stats
+    ctx
+    w
+    ~ghost_x:(Option.map !ghost ~f:(fun (g : Protocol.Pos.t) -> g.x));
   draw_hud ctx w;
   draw_volley_warning ctx w;
   match w.phase with

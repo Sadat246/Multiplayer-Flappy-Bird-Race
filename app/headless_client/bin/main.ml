@@ -27,6 +27,7 @@ let run ~host ~port ~duration ~verbose () =
   let ticks = ref 0 in
   let races_seen = ref [] in
   let last_seen = ref (-1) in
+  let start_requested = ref false in
   let tick_span = Time_ns.Span.of_sec (1. /. Config.sync_hz) in
   let deadline = Time_ns.add (Time_ns.now ()) duration in
   let rec loop () =
@@ -61,14 +62,23 @@ let run ~host ~port ~duration ~verbose () =
           if verbose
           then printf !"event: %{sexp: Protocol.Event.t}\n%!" e.event);
         (match view.race with
-         | Waiting_for_players -> ()
+         | Waiting_for_players -> start_requested := false
+         | Ready_to_start ->
+           (* A human would press the start button; the bot just does. *)
+           if not !start_requested
+           then (
+             start_requested := true;
+             printf "ready - pressing start\n%!";
+             don't_wait_for
+               (Rpc.Rpc.dispatch Protocol.new_race_rpc conn ()
+                >>| (ignore : (unit Or_error.t, Error.t) Result.t -> unit)))
          | Race { seed } ->
            if not (List.mem !races_seen seed ~equal:Int.equal)
            then (
              races_seen := seed :: !races_seen;
              printf "race started, seed %d\n%!" seed;
-             (* Exercise the power-up protocol: claim the course's first
-                item box, then immediately use whatever we won. *)
+             (* Exercise the power-up protocol: claim the course's first item
+                box, then immediately use whatever we won. *)
              don't_wait_for
                (let course = Flappy_game.Course.generate ~seed in
                 match List.hd course.item_boxes with
@@ -88,8 +98,7 @@ let run ~host ~port ~duration ~verbose () =
                      return ()
                    | Ok (Ok (Some item)) ->
                      printf
-                       !"pickup: won %{sexp: Flappy_game.Item.t} from box \
-                         %d\n\
+                       !"pickup: won %{sexp: Flappy_game.Item.t} from box %d\n\
                          %!"
                        item
                        box.id;
@@ -99,8 +108,7 @@ let run ~host ~port ~duration ~verbose () =
                         Rpc.Rpc.dispatch
                           Protocol.use_powerup_rpc
                           conn
-                          ( player
-                          , Fire_volley { x = box.x; y = box.y } )
+                          (player, Fire_volley { x = box.x; y = box.y })
                         >>| (ignore
                              : (unit Or_error.t, Error.t) Result.t -> unit)
                       | Swap ->

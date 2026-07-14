@@ -40,7 +40,7 @@ module Referee = struct
 
   let current_seed t =
     match t.race with
-    | Waiting_for_players -> None
+    | Waiting_for_players | Ready_to_start -> None
     | Race { seed } -> Some seed
   ;;
 
@@ -80,12 +80,17 @@ module Referee = struct
     | Some player ->
       t.occupied.(Protocol.Player_id.index player) <- true;
       let both = Array.for_all t.occupied ~f:Fn.id in
-      if both then start_new_race t;
+      (* No auto-start: with both players in, the race waits for either one
+         to press start (new_race_rpc). A join mid-race (opponent refreshed)
+         also resets to the ready screen. *)
+      if both then t.race <- Ready_to_start;
       printf
         !"join: %{sexp: Protocol.Player_id.t} (%s)%s\n%!"
         player
         name
-        (if both then " - race starts" else " - waiting for opponent");
+        (if both
+         then " - ready, waiting for start"
+         else " - waiting for opponent");
       Ok player
   ;;
 
@@ -93,7 +98,14 @@ module Referee = struct
     t.occupied.(Protocol.Player_id.index player) <- false;
     t.latest.(Protocol.Player_id.index player) <- None;
     if Array.for_all t.occupied ~f:(fun o -> not o)
-    then t.race <- Waiting_for_players;
+    then t.race <- Waiting_for_players
+    else (
+      match t.race with
+      | Ready_to_start -> t.race <- Waiting_for_players
+      | Waiting_for_players | Race _ ->
+        (* Mid-race: leave the race state alone so the remaining player can
+           finish their run (Stage 5 adds the win-by-default). *)
+        ());
     printf !"leave: %{sexp: Protocol.Player_id.t}\n%!" player
   ;;
 

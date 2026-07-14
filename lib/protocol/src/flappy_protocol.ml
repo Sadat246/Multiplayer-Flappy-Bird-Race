@@ -61,6 +61,7 @@ end
 module Race_state = struct
   type t =
     | Waiting_for_players
+    | Ready_to_start
     | Race of { seed : int }
   [@@deriving bin_io, sexp_of, equal]
 end
@@ -97,7 +98,7 @@ let join_rpc =
 let sync_rpc =
   Rpc.Rpc.create
     ~name:"sync"
-    ~version:2
+    ~version:3
     ~bin_query:Update.bin_t
     ~bin_response:[%bin_type_class: View.t Or_error.t]
     ~include_in_error_count:Only_on_exn

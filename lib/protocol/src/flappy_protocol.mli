@@ -95,10 +95,13 @@ module Race_state : sig
   (** The server's race lifecycle, as seen by clients. *)
   type t =
     | Waiting_for_players
+    | Ready_to_start
+    (** Both slots filled, nobody has pressed start yet: clients show the
+        start prompt; either player's [new_race_rpc] launches. *)
     | Race of { seed : int }
-    (** Both slots filled: generate the course from [seed] and run the local
-        countdown. A CHANGED seed means a new race — rebuild the world (this
-        is how "new race" reaches both players). *)
+    (** Generate the course from [seed] and run the local countdown. A
+        CHANGED seed means a new race — rebuild the world (this is how "new
+        race" reaches both players). *)
   [@@deriving bin_io, sexp_of, equal]
 end
 
