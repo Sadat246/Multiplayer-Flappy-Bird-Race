@@ -1,0 +1,6 @@
+(library
+ (name flappy_game_test)
+ (libraries flappy_game core expect_test_helpers_core)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane)))

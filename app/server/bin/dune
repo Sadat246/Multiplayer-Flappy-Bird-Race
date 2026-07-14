@@ -1,0 +1,11 @@
+(executable
+ (name main)
+ (libraries
+  core
+  async
+  core_unix.command_unix
+  uri
+  cohttp-async
+  async_rpc_websocket)
+ (preprocess
+  (pps ppx_jane)))

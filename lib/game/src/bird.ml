@@ -1,0 +1,55 @@
+open! Core
+
+module Speed_input = struct
+  type t =
+    | Accelerate
+    | Brake
+    | Coast
+  [@@deriving sexp_of, equal]
+end
+
+type t =
+  { x : float
+  ; y : float
+  ; vy : float
+  ; speed : float
+  }
+[@@deriving sexp_of, equal]
+
+let initial =
+  { x = 100.
+  ; y = (Config.canvas_height -. Config.bird_size) /. 2.
+  ; vy = 0.
+  ; speed = Config.speed_initial
+  }
+;;
+
+let flap t = { t with vy = Config.flap_impulse }
+
+(* Move [speed] toward [target] by at most [accel_rate *. dt], without
+   overshooting. *)
+let ramp_speed speed ~target ~dt =
+  let max_delta = Config.accel_rate *. dt in
+  let delta =
+    Float.clamp_exn (target -. speed) ~min:(-.max_delta) ~max:max_delta
+  in
+  speed +. delta
+;;
+
+let step t ~dt ~(speed_input : Speed_input.t) =
+  let speed =
+    match speed_input with
+    | Accelerate -> ramp_speed t.speed ~target:Config.speed_cap ~dt
+    | Brake -> ramp_speed t.speed ~target:Config.speed_floor ~dt
+    | Coast -> t.speed
+  in
+  let vy =
+    Float.min (t.vy +. (Config.gravity *. dt)) Config.terminal_velocity
+  in
+  let y = t.y +. (vy *. dt) in
+  (* Ceiling clamps instead of killing: hitting the top just stops the climb,
+     like the classic. *)
+  let y, vy = if Float.( < ) y 0. then 0., 0. else y, vy in
+  let x = t.x +. (speed *. dt) in
+  { x; y; vy; speed }
+;;

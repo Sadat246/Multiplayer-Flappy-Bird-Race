@@ -1,0 +1,5 @@
+(library
+ (name flappy_client)
+ (libraries core bonsai bonsai_web virtual_dom js_of_ocaml flappy_game)
+ (preprocess
+  (pps ppx_jane bonsai.ppx_bonsai ppx_html js_of_ocaml-ppx)))

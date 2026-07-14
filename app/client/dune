@@ -1,0 +1,17 @@
+; Assemble the files the server serves into one directory,
+; [app/client/site], so [-static-dir] can point at a single place:
+;   dune build
+;   dune exec app/server/bin/main.exe -- -port 8080
+
+(subdir
+ site
+ (rule
+  (target index.html)
+  (deps ../static/index.html)
+  (action
+   (copy ../static/index.html index.html)))
+ (rule
+  (target main.bc.js)
+  (deps ../bin/main.bc.js)
+  (action
+   (copy ../bin/main.bc.js main.bc.js))))
