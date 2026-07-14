@@ -1,0 +1,13 @@
+(executable
+ (name main)
+ (libraries
+  core
+  async
+  core_unix.command_unix
+  uri
+  async_rpc_websocket
+  graphics
+  flappy_game
+  flappy_protocol)
+ (preprocess
+  (pps ppx_jane)))
