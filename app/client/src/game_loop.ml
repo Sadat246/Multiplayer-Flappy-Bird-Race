@@ -30,6 +30,16 @@ let show_overlay = ref true
    position every frame, never snapped (context doc §4). *)
 let ghost : Protocol.Pos.t option ref = ref None
 
+let use_held_item () =
+  Option.iter !world ~f:(fun w ->
+    let w, action = World.use_held_item w in
+    world := Some w;
+    match action with
+    | `Applied | `Nothing -> () (* boost/shield are purely local *)
+    | `Fire_volley (x, y) -> Net.send_use (Fire_volley { x; y })
+    | `Request_swap -> Net.send_use Swap)
+;;
+
 let on_keydown code =
   (* [held] makes flap edge-triggered: OS key-repeat fires keydown again, but
      we only flap on the first press. *)
@@ -39,6 +49,7 @@ let on_keydown code =
     match code with
     | "Space" ->
       Option.iter !world ~f:(fun w -> world := Some (World.flap w))
+    | "KeyE" -> use_held_item ()
     | "KeyR" ->
       (* Server-arbitrated: a new seed comes back through sync and both
          clients rebuild. Ignored (server-side) unless 2 players. *)
@@ -56,7 +67,7 @@ let install_input_handlers () =
     on_keydown code;
     (* Swallow keys the game uses so Space/arrows never scroll the page. *)
     match code with
-    | "Space" | "ArrowLeft" | "ArrowRight" | "Backquote" | "KeyR" ->
+    | "Space" | "ArrowLeft" | "ArrowRight" | "Backquote" | "KeyR" | "KeyE" ->
       Js._false
     | _ -> Js._true);
   Dom_html.document##.onkeyup
@@ -108,6 +119,53 @@ let publish_my_pos (w : World.t) =
   Net.my_pos := { Protocol.Pos.x = w.bird.x; y = w.bird.y }
 ;;
 
+(* --- Network events -> world: the client glue World's mli describes. Only
+   translation lives here; all rules live in the pure World. --- *)
+
+let apply_event w ~(me : Protocol.Player_id.t) (event : Protocol.Event.t) =
+  match event with
+  | Powerup_claimed { box_id; by = _; item = _ } ->
+    (* Despawns the box for both players; if I won it, my held item arrived
+       separately via the pickup response. *)
+    World.box_claimed w ~box_id
+  | Volley_fired { by; x; y = _ } ->
+    World.receive_volley w ~x ~hostile:(not (Protocol.Player_id.equal by me))
+  | Swapped { p1; p2 } ->
+    (* Both clients teleport their own bird to the OTHER's position. *)
+    let other : Protocol.Pos.t = match me with P1 -> p2 | P2 -> p1 in
+    (match World.receive_swap w ~other:(other.x, other.y) with
+     | `Swapped w -> w
+     | `Blocked w ->
+       (* My shield ate it: tell the world so the initiator reverts. *)
+       Net.send_use Swap_blocked;
+       w)
+  | Swap_blocked -> World.receive_swap_blocked w
+;;
+
+let process_network (w : World.t) =
+  let w =
+    List.fold (Net.drain_pickup_results ()) ~init:w ~f:(fun w result ->
+      match result with
+      | Some item -> World.receive_pickup w item
+      | None -> w (* opponent won the box; the claim event despawns it *))
+  in
+  let w =
+    match Net.me () with
+    | None -> w
+    | Some me ->
+      List.fold
+        (Net.drain_events ~current_seed:w.seed)
+        ~init:w
+        ~f:(fun w event -> apply_event w ~me event)
+  in
+  (* Touching an unclaimed box with free hands: ask the server. The box only
+     despawns when the claim event comes back — first request wins. *)
+  (match World.touching_unclaimed_box w with
+   | Some box_id -> Net.request_pickup ~box_id
+   | None -> ());
+  w
+;;
+
 (* --- Rendering. Programmer art only (build-plan rule 3). --- *)
 
 (* Canvas methods take wrapped JS numbers in recent js_of_ocaml. *)
@@ -122,6 +180,19 @@ let fill_text ctx ~color ~font ~x ~y text =
   ctx##.fillStyle := Js.string color;
   ctx##.font := Js.string font;
   ctx##fillText (Js.string text) (n x) (n y)
+;;
+
+let fill_circle ctx ~color ~x ~y ~r =
+  ctx##.fillStyle := Js.string color;
+  ctx##beginPath;
+  ctx##arc (n x) (n y) (n r) (n 0.) (n (2. *. Float.pi)) Js._false;
+  ctx##fill
+;;
+
+let stroke_rect ctx ~color ~line_width ~x ~y ~w ~h =
+  ctx##.strokeStyle := Js.string color;
+  ctx##.lineWidth := n line_width;
+  ctx##strokeRect (n x) (n y) (n w) (n h)
 ;;
 
 let with_alpha ctx alpha ~f =
@@ -157,6 +228,10 @@ let draw_overlay ctx (w : World.t option) =
       ; [%string "state %{state}"]
       ; [%string "crashes %{w.crashes#Int}"]
       ; [%string "time %{seconds w.elapsed}"]
+      ; [%string
+          "item %{Option.value_map w.held_item ~default:\"-\" \
+           ~f:Item.to_string} · boost %{seconds w.boost_left} · shield \
+           %{w.shielded#Bool}"]
       ; [%string
           "seed %{w.seed#Int} · scheme %{Sexp.to_string [%sexp \
            (Config.control_scheme : Config.Control_scheme.t)]}"]
@@ -296,6 +371,71 @@ let invuln_blink_off ~invuln_left =
   && Float.( < ) (Float.mod_float invuln_left 0.15) 0.06
 ;;
 
+(* Held-item slot top-right, plus active-effect readouts. *)
+let draw_hud ctx (w : World.t) =
+  let x = Config.canvas_width -. 64. in
+  fill_rect ctx ~color:"#161b22" ~x ~y:24. ~w:44. ~h:44.;
+  stroke_rect ctx ~color:"#30363d" ~line_width:2. ~x ~y:24. ~w:44. ~h:44.;
+  (match w.held_item with
+   | Some item ->
+     fill_text
+       ctx
+       ~color:"#f0c649"
+       ~font:"bold 26px monospace"
+       ~x:(x +. 14.)
+       ~y:55.
+       (Item.tag item);
+     fill_text
+       ctx
+       ~color:"#8b949e"
+       ~font:"11px monospace"
+       ~x:(x -. 12.)
+       ~y:82.
+       [%string "%{Item.to_string item} [E]"]
+   | None ->
+     fill_text
+       ctx
+       ~color:"#30363d"
+       ~font:"bold 26px monospace"
+       ~x:(x +. 16.)
+       ~y:55.
+       "-");
+  if Float.( > ) w.boost_left 0.
+  then
+    fill_text
+      ctx
+      ~color:"#f0c649"
+      ~font:"bold 14px monospace"
+      ~x:(x -. 30.)
+      ~y:104.
+      [%string "BOOST %{seconds w.boost_left}"];
+  if w.shielded
+  then
+    fill_text
+      ctx
+      ~color:"#58a6ff"
+      ~font:"bold 14px monospace"
+      ~x:(x -. 30.)
+      ~y:122.
+      "SHIELD UP"
+;;
+
+(* Incoming-volley warning: a flashing red frame while hostile bullets are in
+   flight (context doc §3: the victim gets a visual warning). *)
+let draw_volley_warning ctx (w : World.t) =
+  let incoming = List.exists w.bullets ~f:(fun b -> b.hostile) in
+  if incoming && Float.( < ) (Float.mod_float w.elapsed 0.3) 0.18
+  then
+    stroke_rect
+      ctx
+      ~color:"#f85149"
+      ~line_width:6.
+      ~x:3.
+      ~y:3.
+      ~w:(Config.canvas_width -. 6.)
+      ~h:(Config.canvas_height -. 6.)
+;;
+
 (* Progress bar across the top: both birds' positions along the full course —
    essential, not polish (context doc §1). *)
 let draw_progress_bar ctx (w : World.t) =
@@ -386,6 +526,40 @@ let draw_race ctx (w : World.t) =
     let sx = x -. offset in
     if Float.( > ) (sx +. rw) 0. && Float.( < ) sx Config.canvas_width
     then fill_rect ctx ~color:"#3fb950" ~x:sx ~y ~w:rw ~h);
+  (* Item boxes: yellow "?" squares, gone once claimed. *)
+  List.iter w.course.item_boxes ~f:(fun box ->
+    if not (Set.mem w.boxes_taken box.id)
+    then (
+      let sx = box.x -. offset in
+      if Float.( > ) (sx +. Config.item_box_size) 0.
+         && Float.( < ) sx Config.canvas_width
+      then (
+        fill_rect
+          ctx
+          ~color:"#f0c649"
+          ~x:sx
+          ~y:box.y
+          ~w:Config.item_box_size
+          ~h:Config.item_box_size;
+        fill_text
+          ctx
+          ~color:"#0d1117"
+          ~font:"bold 18px monospace"
+          ~x:(sx +. 8.)
+          ~y:(box.y +. 20.)
+          "?")));
+  (* Volley bullets: red = the opponent's (can hit me), white = mine (display
+     only; their client decides their fate). *)
+  List.iter w.bullets ~f:(fun b ->
+    let sx = b.x -. offset in
+    if Float.( > ) sx 0. && Float.( < ) sx Config.canvas_width
+    then
+      fill_circle
+        ctx
+        ~color:(if b.hostile then "#f85149" else "#e6edf3")
+        ~x:sx
+        ~y:b.y
+        ~r:Config.bullet_radius);
   (* Finish line: checkered post from ceiling to ground. *)
   let finish_sx = w.course.finish_x -. offset in
   if Float.( > ) (finish_sx +. 24.) 0.
@@ -408,7 +582,20 @@ let draw_race ctx (w : World.t) =
       ~y:bird.y
       ~w:Config.bird_size
       ~h:Config.bird_size;
+  (* Shield: a ring around the bird while it's up. *)
+  if w.shielded
+  then
+    stroke_rect
+      ctx
+      ~color:"#58a6ff"
+      ~line_width:3.
+      ~x:(Config.bird_screen_x -. 5.)
+      ~y:(bird.y -. 5.)
+      ~w:(Config.bird_size +. 10.)
+      ~h:(Config.bird_size +. 10.);
   draw_progress_bar ctx w;
+  draw_hud ctx w;
+  draw_volley_warning ctx w;
   match w.phase with
   | Countdown { time_left } -> draw_countdown ctx ~time_left
   | Racing when Float.( < ) w.elapsed 0.7 -> draw_go ctx
@@ -450,8 +637,9 @@ let start () =
             := World.step !w ~dt:Config.sim_dt ~speed_input:(speed_input ());
             accumulator := !accumulator -. Config.sim_dt
           done;
-          world := Some !w;
-          publish_my_pos !w);
+          let w = process_network !w in
+          world := Some w;
+          publish_my_pos w);
        update_ghost ~dt:elapsed);
     last_ms := Some now_ms;
     render ();

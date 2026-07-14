@@ -26,9 +26,28 @@ module Pipe = struct
   [@@deriving sexp_of, equal]
 end
 
+module Item_box = struct
+  type t =
+    { id : int
+    ; x : float
+    ; y : float
+    }
+  [@@deriving sexp_of, equal]
+
+  let touches t ~bird_x ~bird_y =
+    let s = Config.bird_size in
+    let b = Config.item_box_size in
+    Float.( < ) bird_x (t.x +. b)
+    && Float.( > ) (bird_x +. s) t.x
+    && Float.( < ) bird_y (t.y +. b)
+    && Float.( > ) (bird_y +. s) t.y
+  ;;
+end
+
 type t =
   { pipes : Pipe.t list
   ; rects : Rect.t list
+  ; item_boxes : Item_box.t list
   ; finish_x : float
   }
 [@@deriving sexp_of, equal]
@@ -82,11 +101,16 @@ let generate ~seed =
     ; gap_center = (gap_center_lo +. gap_center_hi) /. 2.
     }
   in
-  let rest =
-    List.folding_map
+  (* Boxes float mid-air in this band: low enough to swoop down to, high
+     enough that diving for one isn't a ground-death trap. *)
+  let box_y_lo = 100. in
+  let box_y_hi = ground_top -. 150. in
+  let pipes_rev, boxes_rev =
+    List.fold
       (List.range 1 Config.course_pipes)
-      ~init:first
-      ~f:(fun prev (_ : int) ->
+      ~init:([ first ], [])
+      ~f:(fun (pipes, boxes) (_ : int) ->
+        let prev = List.hd_exn pipes in
         let spacing = next_spacing state in
         let delta = max_gap_delta ~spacing in
         (* Draw uniformly from the intersection of "reachable from the
@@ -100,12 +124,32 @@ let generate ~seed =
             ~hi:(Float.min gap_center_hi (prev.gap_center +. delta))
         in
         let pipe : Pipe.t = { x = prev.x +. spacing; gap_center } in
-        pipe, pipe)
+        (* Every breather stretch carries one item box, centered in the open
+           corridor between the two pipe columns — the wide gaps exist
+           precisely so grabbing a box is survivable (spec addition, build
+           plan Stage 3/6). *)
+        let boxes =
+          if Float.( >= ) spacing Config.spacing_breather_min
+          then (
+            let corridor_mid =
+              (prev.x +. Config.pipe_width +. pipe.x) /. 2.
+            in
+            let box : Item_box.t =
+              { id = List.length boxes
+              ; x = corridor_mid -. (Config.item_box_size /. 2.)
+              ; y = uniform state ~lo:box_y_lo ~hi:box_y_hi
+              }
+            in
+            box :: boxes)
+          else boxes
+        in
+        pipe :: pipes, boxes)
   in
-  let pipes = first :: rest in
+  let pipes = List.rev pipes_rev in
   let last = List.last_exn pipes in
   { pipes
   ; rects = List.concat_map pipes ~f:pipe_rects
+  ; item_boxes = List.rev boxes_rev
   ; finish_x = last.x +. Config.pipe_width +. Config.finish_after_last_pipe
   }
 ;;

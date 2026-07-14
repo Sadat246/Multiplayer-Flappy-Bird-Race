@@ -4,13 +4,19 @@
     frame and decides what they mean.
 
     Flow: connect to the origin that served the page → [join] → poll [sync]
-    forever (my position out, opponent position + race state in). All state
-    is latest-value only; there is nothing to ack or replay. *)
+    forever (my position + event-log ack out; opponent position, race state
+    and new events in). Positions are latest-value only; events are the
+    reliable channel for discrete facts (claims, volleys, swaps) and are
+    queued here until {!Game_loop} drains them. *)
 
 open! Core
 
 (** Connect and start the sync loop. Call exactly once at startup. *)
 val start : unit -> unit
+
+(** My race slot, once joined. Needed to interpret events ("which side of a
+    swap am I?"). *)
+val me : unit -> Flappy_protocol.Player_id.t option
 
 (** Where my bird is — written by {!Game_loop} every frame, sent to the
     server on the next sync tick. *)
@@ -21,8 +27,26 @@ val my_pos : Flappy_protocol.Pos.t ref
 val race_seed : unit -> int option
 
 (** Opponent's last received position (raw, unsmoothed — {!Game_loop}
-    interpolates). [None] until an opponent is connected and racing. *)
+    interpolates). *)
 val opponent : unit -> Flappy_protocol.Pos.t option
+
+(** Take all events received since the last call, oldest first, already
+    filtered to the given race seed (stale events from a previous race are
+    dropped, but still acknowledged). *)
+val drain_events : current_seed:int -> Flappy_protocol.Event.t list
+
+(** Ask to claim an item box (server-arbitrated, first request wins). The
+    result arrives via {!drain_pickup_results}; at most one request per box
+    is ever in flight. *)
+val request_pickup : box_id:int -> unit
+
+(** Results of my pickup requests: [Some item] = mine, [None] = opponent got
+    there first. *)
+val drain_pickup_results : unit -> Flappy_game.Item.t option list
+
+(** Tell the server I used a volley/swap (boost and shield never hit the
+    wire). *)
+val send_use : Flappy_protocol.Use.t -> unit
 
 (** Milliseconds since [opponent] last changed, for the debug overlay
     (build-plan rule 6). [None] if no update has ever arrived. *)

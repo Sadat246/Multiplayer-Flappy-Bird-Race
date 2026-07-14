@@ -46,9 +46,27 @@ module Pipe : sig
   [@@deriving sexp_of, equal]
 end
 
+module Item_box : sig
+  (** A "?" box (square of {!Config.item_box_size}, top-left [x, y]).
+      Positions come from the seed like everything else, so both clients
+      agree on every box; WHO gets a contested one is the server's call
+      (context doc §3). Boxes sit mid-air in the breather stretches — the
+      deliberately wide gaps — so grabbing one leaves room to recover. *)
+  type t =
+    { id : int (** unique within the course; the arbitration key *)
+    ; x : float
+    ; y : float
+    }
+  [@@deriving sexp_of, equal]
+
+  (** Does the bird's square overlap this box? *)
+  val touches : t -> bird_x:float -> bird_y:float -> bool
+end
+
 type t =
   { pipes : Pipe.t list (** in course order *)
   ; rects : Rect.t list (** the pipes expanded to collision rectangles *)
+  ; item_boxes : Item_box.t list (** in course order, ids 0.. *)
   ; finish_x : float (** cross it (bird's left edge) to finish *)
   }
 [@@deriving sexp_of, equal]

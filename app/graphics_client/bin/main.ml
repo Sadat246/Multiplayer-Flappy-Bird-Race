@@ -28,6 +28,7 @@ module Config = Flappy_game.Config
 module World = Flappy_game.World
 module Course = Flappy_game.Course
 module Bird = Flappy_game.Bird
+module Item = Flappy_game.Item
 
 (* --- Shared mutable state between the net loop and the frame loop. --- *)
 
@@ -38,6 +39,12 @@ let net_status = ref "connecting..."
 let world : World.t option ref = ref None
 let current_seed : int option ref = ref None
 let ghost : Protocol.Pos.t option ref = ref None
+let me : Protocol.Player_id.t option ref = ref None
+let conn_ref : Rpc.Connection.t option ref = ref None
+let event_queue : Protocol.Stamped_event.t Queue.t = Queue.create ()
+let last_seen = ref (-1)
+let pickup_results : Flappy_game.Item.t option Queue.t = Queue.create ()
+let pickups_in_flight : Int.Hash_set.t = Int.Hash_set.create ()
 
 (* --- Input: Graphics gives key presses only, no releases. A movement key
    counts as "held" while X auto-repeat keeps delivering it (initial repeat
@@ -62,6 +69,40 @@ let speed_input () : Bird.Speed_input.t =
 
 let request_new_race = ref (fun () -> ())
 
+let send_use (use : Protocol.Use.t) =
+  match !conn_ref, !me with
+  | Some conn, Some player ->
+    don't_wait_for
+      (Rpc.Rpc.dispatch Protocol.use_powerup_rpc conn (player, use)
+       >>| (ignore : (unit Or_error.t, Error.t) Result.t -> unit))
+  | _ -> ()
+;;
+
+let request_pickup ~box_id =
+  match !conn_ref, !me with
+  | Some conn, Some player when not (Hash_set.mem pickups_in_flight box_id)
+    ->
+    Hash_set.add pickups_in_flight box_id;
+    don't_wait_for
+      (match%map
+         Rpc.Rpc.dispatch Protocol.pickup_request_rpc conn (player, box_id)
+       with
+       | Ok (Ok result) -> Queue.enqueue pickup_results result
+       | Ok (Error (_ : Error.t)) | Error (_ : Error.t) ->
+         Hash_set.remove pickups_in_flight box_id)
+  | _ -> ()
+;;
+
+let use_held_item () =
+  Option.iter !world ~f:(fun w ->
+    let w, action = World.use_held_item w in
+    world := Some w;
+    match action with
+    | `Applied | `Nothing -> ()
+    | `Fire_volley (x, y) -> send_use (Fire_volley { x; y })
+    | `Request_swap -> send_use Swap)
+;;
+
 let drain_keys () =
   while Graphics.key_pressed () do
     let now = Time_ns.now () in
@@ -75,10 +116,57 @@ let drain_keys () =
       then Option.iter !world ~f:(fun w -> world := Some (World.flap w))
     | 'd' | 'D' -> last_accel := now
     | 'a' | 'A' -> last_brake := now
+    | 'e' | 'E' -> use_held_item ()
     | 'r' | 'R' -> !request_new_race ()
     | 'q' | 'Q' -> shutdown 0
     | (_ : char) -> ()
   done
+;;
+
+(* --- Network events -> world (same glue as the browser client). --- *)
+
+let apply_event w ~(me : Protocol.Player_id.t) (event : Protocol.Event.t) =
+  match event with
+  | Powerup_claimed { box_id; by = _; item = _ } ->
+    World.box_claimed w ~box_id
+  | Volley_fired { by; x; y = _ } ->
+    World.receive_volley w ~x ~hostile:(not (Protocol.Player_id.equal by me))
+  | Swapped { p1; p2 } ->
+    let other : Protocol.Pos.t = match me with P1 -> p2 | P2 -> p1 in
+    (match World.receive_swap w ~other:(other.x, other.y) with
+     | `Swapped w -> w
+     | `Blocked w ->
+       send_use Swap_blocked;
+       w)
+  | Swap_blocked -> World.receive_swap_blocked w
+;;
+
+let process_network (w : World.t) =
+  let w =
+    List.fold (Queue.to_list pickup_results) ~init:w ~f:(fun w result ->
+      match result with
+      | Some item -> World.receive_pickup w item
+      | None -> w)
+  in
+  Queue.clear pickup_results;
+  let w =
+    match !me with
+    | None -> w
+    | Some me ->
+      let events = Queue.to_list event_queue in
+      Queue.clear event_queue;
+      List.fold
+        events
+        ~init:w
+        ~f:(fun w (stamped : Protocol.Stamped_event.t) ->
+          if stamped.race_seed = w.seed
+          then apply_event w ~me stamped.event
+          else w)
+  in
+  (match World.touching_unclaimed_box w with
+   | Some box_id -> request_pickup ~box_id
+   | None -> ());
+  w
 ;;
 
 (* --- Rendering. Same programmer art as the browser canvas; Graphics' origin
@@ -104,6 +192,7 @@ let pipe_green = Graphics.rgb 63 185 80
 let bird_yellow = Graphics.rgb 240 198 73
 let dead_red = Graphics.rgb 248 81 73
 let ghost_pink = Graphics.rgb 200 100 150
+let shield_blue = Graphics.rgb 88 166 255
 let white = Graphics.rgb 230 237 243
 let dim = Graphics.rgb 139 148 158
 let checker_dark = Graphics.rgb 22 27 34
@@ -198,6 +287,31 @@ let draw_race (w : World.t) =
     let sx = x -. offset in
     if Float.( > ) (sx +. rw) 0. && Float.( < ) sx Config.canvas_width
     then fill_rect ~color:pipe_green ~x:sx ~y ~w:rw ~h);
+  (* Item boxes: yellow "?" squares, gone once claimed. *)
+  List.iter w.course.item_boxes ~f:(fun box ->
+    if not (Set.mem w.boxes_taken box.id)
+    then (
+      let sx = box.x -. offset in
+      if Float.( > ) (sx +. Config.item_box_size) 0.
+         && Float.( < ) sx Config.canvas_width
+      then (
+        fill_rect
+          ~color:bird_yellow
+          ~x:sx
+          ~y:box.y
+          ~w:Config.item_box_size
+          ~h:Config.item_box_size;
+        text ~color:bg ~x:(sx +. 9.) ~y:(box.y +. 6.) "?")));
+  (* Volley bullets: red = the opponent's, white = mine (display only). *)
+  List.iter w.bullets ~f:(fun b ->
+    let sx = b.x -. offset in
+    if Float.( > ) sx 0. && Float.( < ) sx Config.canvas_width
+    then (
+      Graphics.set_color (if b.hostile then dead_red else white);
+      Graphics.fill_circle
+        (px sx)
+        (px (Config.canvas_height -. b.y))
+        (px Config.bullet_radius)));
   let finish_sx = w.course.finish_x -. offset in
   if Float.( > ) (finish_sx +. 24.) 0.
      && Float.( < ) finish_sx Config.canvas_width
@@ -221,6 +335,43 @@ let draw_race (w : World.t) =
       ~y:w.bird.y
       ~w:Config.bird_size
       ~h:Config.bird_size;
+  (* Shield ring. *)
+  if w.shielded
+  then (
+    Graphics.set_color shield_blue;
+    Graphics.draw_rect
+      (px (Config.bird_screen_x -. 5.))
+      (gy ~y:(w.bird.y -. 5.) ~h:(Config.bird_size +. 10.))
+      (px (Config.bird_size +. 10.))
+      (px (Config.bird_size +. 10.)));
+  (* Held-item slot + effect readouts, top-right. *)
+  let hud_x = Config.canvas_width -. 120. in
+  (match w.held_item with
+   | Some item ->
+     text
+       ~color:bird_yellow
+       ~x:hud_x
+       ~y:28.
+       [%string "[%{Item.tag item}] %{Item.to_string item} (E)"]
+   | None -> text ~color:dim ~x:hud_x ~y:28. "[ ] no item");
+  if Float.( > ) w.boost_left 0.
+  then
+    text
+      ~color:bird_yellow
+      ~x:hud_x
+      ~y:46.
+      [%string "BOOST %{seconds w.boost_left}"];
+  if w.shielded then text ~color:shield_blue ~x:hud_x ~y:64. "SHIELD UP";
+  (* Incoming-volley warning: flashing border. *)
+  if List.exists w.bullets ~f:(fun b -> b.hostile)
+     && Float.( < ) (Float.mod_float w.elapsed 0.3) 0.18
+  then (
+    Graphics.set_color dead_red;
+    Graphics.draw_rect
+      2
+      2
+      (px (Config.canvas_width -. 4.))
+      (px (Config.canvas_height -. 4.)));
   draw_progress_bar w;
   let cx = Config.canvas_width /. 2. in
   let cy = Config.canvas_height /. 2. in
@@ -247,7 +398,8 @@ let draw_race (w : World.t) =
     ~color:dim
     ~x:8.
     ~y:(Config.canvas_height -. 18.)
-    "SPACE flap | hold D faster | hold A brake | R new race | Q quit"
+    "SPACE flap | hold D faster | hold A brake | E use item | R new race | \
+     Q quit"
 ;;
 
 let draw_lobby () =
@@ -330,8 +482,9 @@ let frame () =
        w := World.step !w ~dt:Config.sim_dt ~speed_input:(speed_input ());
        accumulator := !accumulator -. Config.sim_dt
      done;
-     world := Some !w;
-     my_pos := { Protocol.Pos.x = !w.bird.x; y = !w.bird.y });
+     let w = process_network !w in
+     world := Some w;
+     my_pos := { Protocol.Pos.x = w.bird.x; y = w.bird.y });
   update_ghost ~dt;
   render ()
 ;;
@@ -344,8 +497,16 @@ let apply_view (view : Protocol.View.t) =
      seed := None;
      net_status := "waiting for another player to join..."
    | Race { seed = s } ->
+     (* New race: box ids restart from 0; drop stale pickup tracking. *)
+     if not ([%equal: int option] (Some s) !seed)
+     then (
+       Hash_set.clear pickups_in_flight;
+       Queue.clear pickup_results);
      seed := Some s;
      net_status := "in race");
+  List.iter view.events ~f:(fun stamped ->
+    last_seen := Int.max !last_seen stamped.seq;
+    Queue.enqueue event_queue stamped);
   opponent := view.opponent
 ;;
 
@@ -361,6 +522,8 @@ let start_net ~host ~port ~name =
        net_status := [%string "join failed: %{Error.to_string_hum err}"]
      | Ok (Ok player) ->
        net_status := "waiting for another player to join...";
+       me := Some player;
+       conn_ref := Some conn;
        (request_new_race
         := fun () ->
              don't_wait_for
@@ -373,7 +536,10 @@ let start_net ~host ~port ~name =
              Rpc.Rpc.dispatch
                Protocol.sync_rpc
                conn
-               { Protocol.Update.player; pos = !my_pos }
+               { Protocol.Update.player
+               ; pos = !my_pos
+               ; last_seen_event = !last_seen
+               }
            with
            | Ok (Ok view) -> apply_view view
            | Ok (Error err) ->

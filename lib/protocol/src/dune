@@ -1,5 +1,5 @@
 (library
  (name flappy_protocol)
- (libraries core async_rpc_kernel)
+ (libraries core async_rpc_kernel flappy_game)
  (preprocess
   (pps ppx_jane)))

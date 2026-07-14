@@ -42,10 +42,15 @@ val flap : t -> t
     per [speed_input] and [scheme]. The ceiling clamps rather than kills
     (classic flappy); collisions are {!World}'s business, not ours. [scheme]
     is a parameter (rather than read from {!Config}) so tests exercise both;
-    the client passes {!Config.control_scheme}. *)
+    the client passes {!Config.control_scheme}.
+
+    [speed_cap] is the cap THIS step ({!Config.speed_cap} normally,
+    {!Config.boost_speed_cap} while boosting). A speed above the cap — e.g.
+    the moment a boost expires — ramps back down, never snaps. *)
 val step
   :  t
   -> dt:float
   -> speed_input:Speed_input.t
   -> scheme:Config.Control_scheme.t
+  -> speed_cap:float
   -> t

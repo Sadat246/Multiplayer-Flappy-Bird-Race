@@ -26,6 +26,7 @@ let run ~host ~port ~duration ~verbose () =
   printf !"joined as %{sexp: Protocol.Player_id.t}\n%!" player;
   let ticks = ref 0 in
   let races_seen = ref [] in
+  let last_seen = ref (-1) in
   let tick_span = Time_ns.Span.of_sec (1. /. Config.sync_hz) in
   let deadline = Time_ns.add (Time_ns.now ()) duration in
   let rec loop () =
@@ -49,19 +50,66 @@ let run ~host ~port ~duration ~verbose () =
         Rpc.Rpc.dispatch
           Protocol.sync_rpc
           conn
-          { Protocol.Update.player; pos }
+          { Protocol.Update.player; pos; last_seen_event = !last_seen }
       with
       | Error err | Ok (Error err) ->
         printf !"sync failed: %{Error#hum}\n%!" err;
         Rpc.Connection.close conn
       | Ok (Ok view) ->
+        List.iter view.events ~f:(fun (e : Protocol.Stamped_event.t) ->
+          last_seen := Int.max !last_seen e.seq;
+          if verbose
+          then printf !"event: %{sexp: Protocol.Event.t}\n%!" e.event);
         (match view.race with
          | Waiting_for_players -> ()
          | Race { seed } ->
            if not (List.mem !races_seen seed ~equal:Int.equal)
            then (
              races_seen := seed :: !races_seen;
-             printf "race started, seed %d\n%!" seed));
+             printf "race started, seed %d\n%!" seed;
+             (* Exercise the power-up protocol: claim the course's first
+                item box, then immediately use whatever we won. *)
+             don't_wait_for
+               (let course = Flappy_game.Course.generate ~seed in
+                match List.hd course.item_boxes with
+                | None -> return ()
+                | Some box ->
+                  (match%bind
+                     Rpc.Rpc.dispatch
+                       Protocol.pickup_request_rpc
+                       conn
+                       (player, box.id)
+                   with
+                   | Error err | Ok (Error err) ->
+                     printf !"pickup failed: %{Error#hum}\n%!" err;
+                     return ()
+                   | Ok (Ok None) ->
+                     printf "pickup: opponent beat me to box %d\n%!" box.id;
+                     return ()
+                   | Ok (Ok (Some item)) ->
+                     printf
+                       !"pickup: won %{sexp: Flappy_game.Item.t} from box \
+                         %d\n\
+                         %!"
+                       item
+                       box.id;
+                     (match item with
+                      | Boost | Shield -> return () (* local-only items *)
+                      | Volley ->
+                        Rpc.Rpc.dispatch
+                          Protocol.use_powerup_rpc
+                          conn
+                          ( player
+                          , Fire_volley { x = box.x; y = box.y } )
+                        >>| (ignore
+                             : (unit Or_error.t, Error.t) Result.t -> unit)
+                      | Swap ->
+                        Rpc.Rpc.dispatch
+                          Protocol.use_powerup_rpc
+                          conn
+                          (player, Swap)
+                        >>| (ignore
+                             : (unit Or_error.t, Error.t) Result.t -> unit))))));
         if verbose
         then
           printf

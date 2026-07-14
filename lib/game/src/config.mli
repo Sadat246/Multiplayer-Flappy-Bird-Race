@@ -122,6 +122,36 @@ val fairness_margin : float
     the seed shown in the debug overlay. *)
 val debug_seed : int
 
+(** {2 Item boxes and power-ups (context doc §3)} *)
+
+(** Side of the (square) "?" item boxes on the course. *)
+val item_box_size : float
+
+(** How long {!Item.Boost} raises the speed cap. *)
+val boost_duration : float
+
+(** The raised cap while boosting (player keeps brake control). *)
+val boost_speed_cap : float
+
+(** Bullet speed for {!Item.Volley} — ~1.8x [speed_cap], per the design's
+    1–2s dodge window. *)
+val bullet_speed : float
+
+val bullet_radius : float
+
+(** The five fixed bullet heights (world y of bullet centers). Chosen to
+    leave bird-sized vertical gaps in the spread — dodging a volley is a
+    thread-the-gap skill shot, never a guaranteed hit. *)
+val volley_heights : float list
+
+(** Bullets despawn after traveling this far (nothing to hit beyond a couple
+    of screens anyway). *)
+val bullet_max_range : float
+
+(** Brief i-frames when a shield absorbs a hit, so breaking a shield inside a
+    pipe leaves room to escape rather than dying on the very next frame. *)
+val shield_break_invuln : float
+
 (** {2 Death, respawn, race flow} *)
 
 (** Pre-race countdown: the bird hangs frozen this long before control

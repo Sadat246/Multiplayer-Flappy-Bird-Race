@@ -14,7 +14,7 @@ let show (bird : Bird.t) =
         ~speed:(r bird.speed : float)]
 ;;
 
-let step = Bird.step ~dt:Config.sim_dt
+let step = Bird.step ~dt:Config.sim_dt ~speed_cap:Config.speed_cap
 
 (* Step [n] times with the same input, printing every [every] steps. *)
 let trajectory

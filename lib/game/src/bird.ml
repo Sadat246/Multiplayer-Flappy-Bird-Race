@@ -41,11 +41,12 @@ let step
   ~dt
   ~(speed_input : Speed_input.t)
   ~(scheme : Config.Control_scheme.t)
+  ~speed_cap
   =
   let speed =
     match speed_input, scheme with
     | Accelerate, _ ->
-      ramp_speed t.speed ~target:Config.speed_cap ~rate:Config.accel_rate ~dt
+      ramp_speed t.speed ~target:speed_cap ~rate:Config.accel_rate ~dt
     | Brake, _ ->
       ramp_speed
         t.speed
@@ -70,6 +71,12 @@ let step
           ~rate:Config.cruise_decay_rate
           ~dt
       else t.speed
+  in
+  (* Over the cap (a boost just expired): ramp back down, never snap. *)
+  let speed =
+    if Float.( > ) speed speed_cap
+    then ramp_speed speed ~target:speed_cap ~rate:Config.accel_rate ~dt
+    else speed
   in
   let vy =
     Float.min (t.vy +. (Config.gravity *. dt)) Config.terminal_velocity

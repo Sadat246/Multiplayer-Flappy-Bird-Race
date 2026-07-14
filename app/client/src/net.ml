@@ -19,8 +19,30 @@ let opponent_pos = ref None
 let opponent_updated_at = ref None
 let connection = ref None
 let player_id = ref None
+
+(* Events queue newest-last; [last_seen] is the ack we send with every sync.
+   Stale-race events are dropped at drain time but still acked — acking is
+   about the log position, not about caring. *)
+let event_queue : Protocol.Stamped_event.t Queue.t = Queue.create ()
+let last_seen = ref (-1)
+let pickup_results : Flappy_game.Item.t option Queue.t = Queue.create ()
+let pickups_in_flight : Int.Hash_set.t = Int.Hash_set.create ()
+let me () = !player_id
 let race_seed () = !seed
 let opponent () = !opponent_pos
+
+let drain_events ~current_seed =
+  let all = Queue.to_list event_queue in
+  Queue.clear event_queue;
+  List.filter_map all ~f:(fun { seq = _; race_seed; event } ->
+    Option.some_if (race_seed = current_seed) event)
+;;
+
+let drain_pickup_results () =
+  let all = Queue.to_list pickup_results in
+  Queue.clear pickup_results;
+  all
+;;
 
 let ms_since_opponent_update () =
   Option.map !opponent_updated_at ~f:(fun at ->
@@ -42,8 +64,17 @@ let apply_view (view : Protocol.View.t) =
      seed := None;
      status := Waiting_for_opponent
    | Race { seed = s } ->
+     (* New race: box ids restart from 0, so in-flight pickup tracking from
+        the previous course must not suppress requests. *)
+     if not ([%equal: int option] (Some s) !seed)
+     then (
+       Hash_set.clear pickups_in_flight;
+       Queue.clear pickup_results);
      seed := Some s;
      status := In_race);
+  List.iter view.events ~f:(fun stamped ->
+    last_seen := Int.max !last_seen stamped.seq;
+    Queue.enqueue event_queue stamped);
   match view.opponent with
   | None ->
     opponent_pos := None;
@@ -68,7 +99,10 @@ let sync_loop conn player =
         Rpc.Rpc.dispatch
           Protocol.sync_rpc
           conn
-          { Protocol.Update.player; pos = !my_pos }
+          { Protocol.Update.player
+          ; pos = !my_pos
+          ; last_seen_event = !last_seen
+          }
       with
       | Ok (Ok view) -> apply_view view
       | Ok (Error err) ->
@@ -96,6 +130,31 @@ let start () =
           sync_loop conn player
         | Ok (Error err) -> status := Failed (Error.to_string_hum err)
         | Error err -> status := Failed (Error.to_string_hum err)))
+;;
+
+let request_pickup ~box_id =
+  match !connection, !player_id with
+  | Some conn, Some player when not (Hash_set.mem pickups_in_flight box_id)
+    ->
+    Hash_set.add pickups_in_flight box_id;
+    don't_wait_for
+      (match%map
+         Rpc.Rpc.dispatch Protocol.pickup_request_rpc conn (player, box_id)
+       with
+       | Ok (Ok result) -> Queue.enqueue pickup_results result
+       | Ok (Error (_ : Error.t)) | Error (_ : Error.t) ->
+         (* Failed request: allow a retry on next touch. *)
+         Hash_set.remove pickups_in_flight box_id)
+  | _ -> ()
+;;
+
+let send_use use =
+  match !connection, !player_id with
+  | Some conn, Some player ->
+    don't_wait_for
+      (Rpc.Rpc.dispatch Protocol.use_powerup_rpc conn (player, use)
+       >>| (ignore : (unit Or_error.t, Error.t) Result.t -> unit))
+  | _ -> ()
 ;;
 
 let request_new_race () =

@@ -160,7 +160,7 @@ let%expect_test "crossing the finish line ends the race and freezes the \
   print_s [%sexp (World.equal finished later : bool)];
   [%expect
     {|
-    (finished (crashes 0) (x 22594.1) (y 201))
+    (finished (crashes 0) (x 21105.5) (y 201))
     61.5
     true
     |}]
