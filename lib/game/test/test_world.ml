@@ -7,12 +7,18 @@ let step_seconds world ~seconds =
     World.step world ~dt:Config.sim_dt ~speed_input:Coast)
 ;;
 
+(* A world already past the countdown, for tests about racing behavior. *)
+let racing_world () =
+  { (World.create ~seed:Config.debug_seed) with phase = Racing }
+;;
+
 (* Phase constructor + counters + rounded position: enough to pin behavior
    without depending on brittle countdown remainders. *)
 let show (world : World.t) =
   let r = Float.round_decimal ~decimal_digits:1 in
   let phase =
     match world.phase with
+    | Countdown _ -> "countdown"
     | Racing when Float.( > ) world.invuln_left 0. -> "racing+invuln"
     | Racing -> "racing"
     | Dead _ -> "dead"
@@ -26,21 +32,45 @@ let show (world : World.t) =
         ~y:(r world.bird.y : float)]
 ;;
 
+let%expect_test "races start with a countdown: bird frozen, clock stopped" =
+  let world = World.create ~seed:Config.debug_seed in
+  show world;
+  (* 4.9s in: still counting down, bird exactly where it started, no race
+     time elapsed. *)
+  let almost = step_seconds world ~seconds:4.9 in
+  show almost;
+  print_s [%sexp (almost.elapsed : float)];
+  (* Flaps during the countdown are ignored. *)
+  print_s [%sexp (World.equal almost (World.flap almost) : bool)];
+  (* Past 5s: racing (and falling — flap or die!). *)
+  let racing =
+    step_seconds world ~seconds:(Config.countdown_duration +. 0.1)
+  in
+  show racing;
+  [%expect
+    {|
+    (countdown (crashes 0) (x 100) (y 255))
+    (countdown (crashes 0) (x 100) (y 255))
+    0
+    true
+    (racing (crashes 0) (x 126) (y 268))
+    |}]
+;;
+
 let%expect_test "free fall: dies on the ground, respawns safely with \
                  i-frames"
   =
   (* No flapping: the bird free-falls into the ground in ~0.41s. At 0.5s it
      is dead and tumbled to rest on the ground. After the 2s respawn pause it
      is racing again at the nearest safe x (the runway — it never reached the
-     first pipe), mid-height, invulnerable. *)
-  let world = World.create ~seed:Config.debug_seed in
-  let dead = step_seconds world ~seconds:0.5 in
+     first pipe), mid-height, invulnerable. Left to itself it free-falls to
+     death again — hence crashes 2 by the last sample. *)
+  let dead = step_seconds (racing_world ()) ~seconds:0.5 in
   show dead;
   let respawned = step_seconds dead ~seconds:Config.respawn_pause in
   show respawned;
-  (* I-frames expire after invuln_duration. *)
-  let vulnerable = step_seconds respawned ~seconds:Config.invuln_duration in
-  show vulnerable;
+  let later = step_seconds respawned ~seconds:Config.invuln_duration in
+  show later;
   [%expect
     {|
     (dead (crashes 1) (x 204) (y 450))
@@ -52,7 +82,7 @@ let%expect_test "free fall: dies on the ground, respawns safely with \
 let%expect_test "pipe overlap kills when vulnerable, passes through with \
                  i-frames"
   =
-  let world = World.create ~seed:Config.debug_seed in
+  let world = racing_world () in
   (* Place the bird inside the first pipe's top rectangle. *)
   let first_pipe = List.hd_exn world.course.pipes in
   let inside = { Bird.initial with x = first_pipe.x +. 10.; y = 10. } in
@@ -80,7 +110,7 @@ let%expect_test "pipe overlap kills when vulnerable, passes through with \
 let%expect_test "respawn snaps to the nearest gap between pipes" =
   (* Kill the bird midway between pipes 3 and 4: the respawn x must be clear
      of both, and mid-height. *)
-  let world = World.create ~seed:Config.debug_seed in
+  let world = racing_world () in
   let p3 = List.nth_exn world.course.pipes 2 in
   let p4 = List.nth_exn world.course.pipes 3 in
   let died_at = (p3.x +. p4.x) /. 2. in
@@ -112,7 +142,7 @@ let%expect_test "respawn snaps to the nearest gap between pipes" =
 let%expect_test "crossing the finish line ends the race and freezes the \
                  world"
   =
-  let world = World.create ~seed:Config.debug_seed in
+  let world = racing_world () in
   let near_finish =
     { world with
       bird = { Bird.initial with x = world.course.finish_x -. 5.; y = 200. }
@@ -124,7 +154,7 @@ let%expect_test "crossing the finish line ends the race and freezes the \
   (match finished.phase with
    | Finished { time } ->
      print_s [%sexp (Float.round_decimal time ~decimal_digits:1 : float)]
-   | Racing | Dead _ -> print_s [%sexp "not finished!"]);
+   | Countdown _ | Racing | Dead _ -> print_s [%sexp "not finished!"]);
   (* Frozen: further steps change nothing. *)
   let later = step_seconds finished ~seconds:1. in
   print_s [%sexp (World.equal finished later : bool)];
@@ -136,7 +166,7 @@ let%expect_test "crossing the finish line ends the race and freezes the \
     |}]
 ;;
 
-let%expect_test "restart: same course, fresh everything else" =
+let%expect_test "new race: fresh countdown on a DIFFERENT course, seed + 1" =
   let world = World.create ~seed:Config.debug_seed in
   let messy =
     { world with
@@ -146,17 +176,24 @@ let%expect_test "restart: same course, fresh everything else" =
     ; bird = { Bird.initial with x = 12345. }
     }
   in
-  let fresh = World.restart messy in
+  let fresh = World.new_race messy in
   print_s
     [%message
       ""
-        ~same_course:(Course.equal fresh.course world.course : bool)
-        ~reset:(World.equal fresh world : bool)];
-  [%expect {| ((same_course true) (reset true)) |}]
+        ~seed:(fresh.seed : int)
+        ~new_course:(not (Course.equal fresh.course world.course) : bool)
+        ~same_as_create:
+          (World.equal fresh (World.create ~seed:(world.seed + 1)) : bool)];
+  show fresh;
+  [%expect
+    {|
+    ((seed 43) (new_course true) (same_as_create true))
+    (countdown (crashes 0) (x 100) (y 255))
+    |}]
 ;;
 
 let%expect_test "dead and finished birds don't flap" =
-  let world = World.create ~seed:Config.debug_seed in
+  let world = racing_world () in
   let dead = { world with phase = Dead { time_left = 0.5; died_at = 0. } } in
   let finished = { world with phase = Finished { time = 1. } } in
   print_s

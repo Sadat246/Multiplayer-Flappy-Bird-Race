@@ -28,7 +28,7 @@ let on_keydown code =
     Hash_set.add held code;
     match code with
     | "Space" -> world := World.flap !world
-    | "KeyR" -> world := World.restart !world
+    | "KeyR" -> world := World.new_race !world
     | "Backquote" -> show_overlay := not !show_overlay
     | _ -> ())
 ;;
@@ -76,6 +76,7 @@ let draw_overlay ctx (w : World.t) =
   let bird = w.bird in
   let state =
     match w.phase with
+    | Countdown { time_left } -> [%string "countdown (%{seconds time_left})"]
     | Racing when Float.( > ) w.invuln_left 0. ->
       [%string "invulnerable (%{seconds w.invuln_left})"]
     | Racing -> "alive"
@@ -93,7 +94,7 @@ let draw_overlay ctx (w : World.t) =
     ; [%string "crashes %{w.crashes#Int}"]
     ; [%string "time %{seconds w.elapsed}"]
     ; [%string
-        "seed %{Config.debug_seed#Int} · scheme %{Sexp.to_string [%sexp \
+        "seed %{w.seed#Int} · scheme %{Sexp.to_string [%sexp \
          (Config.control_scheme : Config.Control_scheme.t)]}"]
     ]
   in
@@ -104,6 +105,55 @@ let draw_overlay ctx (w : World.t) =
       (Js.string line)
       (n 8.)
       (n (16. +. (Float.of_int i *. 14.))))
+;;
+
+(* The pre-race countdown: big centered digits (5..4..3..2..1), plus GO! for
+   the first moments of racing. *)
+let draw_countdown ctx ~time_left =
+  fill_text
+    ctx
+    ~color:"#f0c649"
+    ~font:"bold 96px monospace"
+    ~x:((Config.canvas_width /. 2.) -. 30.)
+    ~y:(Config.canvas_height /. 2.)
+    (Int.to_string (Float.to_int (Float.round_up time_left)));
+  fill_text
+    ctx
+    ~color:"#8b949e"
+    ~font:"16px monospace"
+    ~x:((Config.canvas_width /. 2.) -. 60.)
+    ~y:((Config.canvas_height /. 2.) +. 40.)
+    "get ready..."
+;;
+
+let draw_go ctx =
+  fill_text
+    ctx
+    ~color:"#3fb950"
+    ~font:"bold 72px monospace"
+    ~x:((Config.canvas_width /. 2.) -. 65.)
+    ~y:(Config.canvas_height /. 2.)
+    "GO!"
+;;
+
+(* The finish line: an unmissable two-column checkered post from ceiling to
+   ground (still rectangles — build-plan rule 3). *)
+let draw_finish_post ctx ~sx =
+  let square = 12. in
+  let rows = Float.to_int (Float.round_up (Course.ground_top /. square)) in
+  for row = 0 to rows - 1 do
+    for col = 0 to 1 do
+      let y = Float.of_int row *. square in
+      let color = if (row + col) % 2 = 0 then "#e6edf3" else "#161b22" in
+      fill_rect
+        ctx
+        ~color
+        ~x:(sx +. (Float.of_int col *. square))
+        ~y
+        ~w:square
+        ~h:(Float.min square (Course.ground_top -. y))
+    done
+  done
 ;;
 
 let draw_win_screen ctx ~time ~crashes =
@@ -133,9 +183,9 @@ let draw_win_screen ctx ~time ~crashes =
     ctx
     ~color:"#8b949e"
     ~font:"14px monospace"
-    ~x:(center_x -. 110.)
+    ~x:(center_x -. 130.)
     ~y:((Config.canvas_height /. 2.) +. 48.)
-    "press R to race again"
+    "press R to start a new race"
 ;;
 
 (* Flash the bird during i-frames: a ~7 Hz blink driven by the remaining
@@ -176,21 +226,15 @@ let render () =
       let sx = x -. offset in
       if Float.( > ) (sx +. rw) 0. && Float.( < ) sx Config.canvas_width
       then fill_rect ctx ~color:"#3fb950" ~x:sx ~y ~w:rw ~h);
-    (* Finish line: a white post from ceiling to ground. *)
+    (* Finish line: checkered post from ceiling to ground. *)
     let finish_sx = w.course.finish_x -. offset in
-    if Float.( > ) finish_sx 0. && Float.( < ) finish_sx Config.canvas_width
-    then
-      fill_rect
-        ctx
-        ~color:"#e6edf3"
-        ~x:finish_sx
-        ~y:0.
-        ~w:10.
-        ~h:Course.ground_top;
+    if Float.( > ) (finish_sx +. 24.) 0.
+       && Float.( < ) finish_sx Config.canvas_width
+    then draw_finish_post ctx ~sx:finish_sx;
     (* The bird: yellow racing, red dead, blinking during i-frames. *)
     let color =
       match w.phase with
-      | Racing | Finished _ -> "#f0c649"
+      | Countdown _ | Racing | Finished _ -> "#f0c649"
       | Dead _ -> "#f85149"
     in
     if not (invuln_blink_off ~invuln_left:w.invuln_left)
@@ -203,6 +247,8 @@ let render () =
         ~w:Config.bird_size
         ~h:Config.bird_size;
     (match w.phase with
+     | Countdown { time_left } -> draw_countdown ctx ~time_left
+     | Racing when Float.( < ) w.elapsed 0.7 -> draw_go ctx
      | Finished { time } -> draw_win_screen ctx ~time ~crashes:w.crashes
      | Racing | Dead _ -> ());
     if !show_overlay then draw_overlay ctx w

@@ -111,11 +111,18 @@ val climb_rate : float
     bound is comfortably, not marginally, achievable. *)
 val fairness_margin : float
 
-(** Fixed seed until Stage 7 (build-plan rule 7): same course every run so
-    tuning changes are comparable. *)
+(** Seed of the FIRST race after page load (fixed until Stage 7, per
+    build-plan rule 7, so tuning runs are comparable). Each "new race"
+    advances the seed by one — fresh course per race, still reproducible
+    from the seed shown in the debug overlay. *)
 val debug_seed : int
 
 (** {2 Death, respawn, race flow} *)
+
+(** Pre-race countdown: the bird hangs frozen this long before control
+    begins. Single-player ticks it locally; Stage 5's server drives the same
+    countdown for both players from the [start] message. *)
+val countdown_duration : float
 
 (** How long the bird stays dead before respawning. *)
 val respawn_pause : float

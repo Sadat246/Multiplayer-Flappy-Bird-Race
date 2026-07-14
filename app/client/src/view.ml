@@ -43,7 +43,7 @@ let app (local_ _graph) : Vdom.Node.t Bonsai.t =
         <h1 style="font-size:18px; margin:0">Flappy Racer — square avoiding squares</h1>
         %{canvas}
         <div %{style ("font-size:13px; color:" ^ text_dim)}>
-          space = flap · hold → to speed up · hold ← to brake · R = restart race · ` = debug overlay
+          space = flap · hold → to speed up · hold ← to brake · R = new race (new course) · ` = debug overlay
         </div>
       </div>
     |}

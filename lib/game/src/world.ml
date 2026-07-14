@@ -2,6 +2,7 @@ open! Core
 
 module Phase = struct
   type t =
+    | Countdown of { time_left : float }
     | Racing
     | Dead of
         { time_left : float
@@ -17,34 +18,31 @@ type t =
   ; invuln_left : float
   ; crashes : int
   ; elapsed : float
+  ; seed : int
   ; course : Course.t
   }
 [@@deriving sexp_of, equal]
 
 let create ~seed =
   { bird = Bird.initial
-  ; phase = Racing
+  ; phase = Countdown { time_left = Config.countdown_duration }
   ; invuln_left = 0.
   ; crashes = 0
   ; elapsed = 0.
+  ; seed
   ; course = Course.generate ~seed
   }
 ;;
 
-let restart t =
-  { bird = Bird.initial
-  ; phase = Racing
-  ; invuln_left = 0.
-  ; crashes = 0
-  ; elapsed = 0.
-  ; course = t.course
-  }
-;;
+(* Advancing the seed (rather than randomizing) keeps every race reproducible
+   from the seed in the debug overlay while still giving a fresh course per
+   race. Stage 5 replaces this with the server's seed. *)
+let new_race t = create ~seed:(t.seed + 1)
 
 let flap t =
   match t.phase with
   | Racing -> { t with bird = Bird.flap t.bird }
-  | Dead _ | Finished _ -> t
+  | Countdown _ | Dead _ | Finished _ -> t
 ;;
 
 let hit_ground (bird : Bird.t) =
@@ -91,6 +89,11 @@ let tumble (bird : Bird.t) ~dt : Bird.t =
 let step t ~dt ~speed_input =
   match t.phase with
   | Finished _ -> t
+  | Countdown { time_left } ->
+    let time_left = time_left -. dt in
+    if Float.( <= ) time_left 0.
+    then { t with phase = Racing }
+    else { t with phase = Countdown { time_left } }
   | Dead { time_left; died_at } ->
     let t = { t with elapsed = t.elapsed +. dt } in
     let time_left = time_left -. dt in
