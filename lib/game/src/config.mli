@@ -139,3 +139,10 @@ val invuln_duration : float
 (** Fixed timestep of the simulation. The render loop may run at any monitor
     rate; physics always steps by exactly this. *)
 val sim_dt : float
+
+(** {2 Networking} *)
+
+(** How many times per second the client exchanges state with the server
+    (sends its position, receives the opponent's) — context doc §4's 20–30
+    Hz. Ghost smoothness knob: raise this before touching architecture. *)
+val sync_hz : float

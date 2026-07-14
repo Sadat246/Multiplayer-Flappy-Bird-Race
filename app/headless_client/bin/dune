@@ -5,8 +5,8 @@
   async
   core_unix.command_unix
   uri
-  cohttp-async
   async_rpc_websocket
+  flappy_game
   flappy_protocol)
  (preprocess
   (pps ppx_jane)))

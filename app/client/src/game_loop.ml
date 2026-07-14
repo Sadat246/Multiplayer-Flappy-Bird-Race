@@ -1,6 +1,7 @@
 open! Core
 open Js_of_ocaml
 open Flappy_game
+module Protocol = Flappy_protocol
 
 let canvas_id = "game-canvas"
 
@@ -15,10 +16,19 @@ let speed_input () : Bird.Speed_input.t =
   | _ -> Coast
 ;;
 
-(* --- Mutable client state: the world, and overlay visibility. --- *)
+(* --- Mutable client state. ---
 
-let world = ref (World.create ~seed:Config.debug_seed)
+   The race lifecycle is server-driven (Stage 4): we build a [World] only
+   when the server hands us a seed, and rebuild whenever the seed changes
+   (that's how "new race" arrives). [world = None] = lobby. *)
+
+let world : World.t option ref = ref None
+let current_seed : int option ref = ref None
 let show_overlay = ref true
+
+(* The opponent's ghost as DRAWN: eased toward the last received network
+   position every frame, never snapped (context doc §4). *)
+let ghost : Protocol.Pos.t option ref = ref None
 
 let on_keydown code =
   (* [held] makes flap edge-triggered: OS key-repeat fires keydown again, but
@@ -27,8 +37,12 @@ let on_keydown code =
   then (
     Hash_set.add held code;
     match code with
-    | "Space" -> world := World.flap !world
-    | "KeyR" -> world := World.new_race !world
+    | "Space" ->
+      Option.iter !world ~f:(fun w -> world := Some (World.flap w))
+    | "KeyR" ->
+      (* Server-arbitrated: a new seed comes back through sync and both
+         clients rebuild. Ignored (server-side) unless 2 players. *)
+      Net.request_new_race ()
     | "Backquote" -> show_overlay := not !show_overlay
     | _ -> ())
 ;;
@@ -54,6 +68,46 @@ let install_input_handlers () =
     Js._true)
 ;;
 
+(* --- Simulation bookkeeping driven from the frame loop. --- *)
+
+(* Rebuild the world when the server's seed appears or changes. *)
+let track_race_state () =
+  match Net.race_seed () with
+  | None ->
+    world := None;
+    current_seed := None;
+    ghost := None
+  | Some seed ->
+    if not ([%equal: int option] (Some seed) !current_seed)
+    then (
+      world := Some (World.create ~seed);
+      current_seed := Some seed;
+      ghost := None)
+;;
+
+(* Ease the drawn ghost toward the last received position: exponential
+   smoothing, frame-rate independent, never snapping (except the very first
+   sighting). Variable opponent speed comes for free. *)
+let update_ghost ~dt =
+  match Net.opponent () with
+  | None -> ghost := None
+  | Some target ->
+    let eased =
+      match !ghost with
+      | None -> target
+      | Some d ->
+        let a = 1. -. Float.exp (-10. *. dt) in
+        { Protocol.Pos.x = d.x +. ((target.x -. d.x) *. a)
+        ; y = d.y +. ((target.y -. d.y) *. a)
+        }
+    in
+    ghost := Some eased
+;;
+
+let publish_my_pos (w : World.t) =
+  Net.my_pos := { Protocol.Pos.x = w.bird.x; y = w.bird.y }
+;;
+
 (* --- Rendering. Programmer art only (build-plan rule 3). --- *)
 
 (* Canvas methods take wrapped JS numbers in recent js_of_ocaml. *)
@@ -70,45 +124,61 @@ let fill_text ctx ~color ~font ~x ~y text =
   ctx##fillText (Js.string text) (n x) (n y)
 ;;
 
+let with_alpha ctx alpha ~f =
+  ctx##.globalAlpha := n alpha;
+  f ();
+  ctx##.globalAlpha := n 1.0
+;;
+
 let seconds s = [%string "%{Float.round_decimal s ~decimal_digits:1#Float}s"]
 
-let draw_overlay ctx (w : World.t) =
-  let bird = w.bird in
-  let state =
-    match w.phase with
-    | Countdown { time_left } -> [%string "countdown (%{seconds time_left})"]
-    | Racing when Float.( > ) w.invuln_left 0. ->
-      [%string "invulnerable (%{seconds w.invuln_left})"]
-    | Racing -> "alive"
-    | Dead { time_left; _ } -> [%string "dead (%{seconds time_left})"]
-    | Finished { time } -> [%string "finished (%{seconds time})"]
+let draw_overlay ctx (w : World.t option) =
+  let world_lines =
+    match w with
+    | None -> [ "state lobby" ]
+    | Some w ->
+      let bird = w.bird in
+      let state =
+        match w.phase with
+        | Countdown { time_left } ->
+          [%string "countdown (%{seconds time_left})"]
+        | Racing when Float.( > ) w.invuln_left 0. ->
+          [%string "invulnerable (%{seconds w.invuln_left})"]
+        | Racing -> "alive"
+        | Dead { time_left; _ } -> [%string "dead (%{seconds time_left})"]
+        | Finished { time } -> [%string "finished (%{seconds time})"]
+      in
+      [ [%string
+          "x %{Float.round_nearest bird.x#Float} / %{Float.round_nearest \
+           w.course.finish_x#Float}"]
+      ; [%string "y %{Float.round_nearest bird.y#Float}"]
+      ; [%string "vy %{Float.round_nearest bird.vy#Float}"]
+      ; [%string "speed %{Float.round_nearest bird.speed#Float}"]
+      ; [%string "state %{state}"]
+      ; [%string "crashes %{w.crashes#Int}"]
+      ; [%string "time %{seconds w.elapsed}"]
+      ; [%string
+          "seed %{w.seed#Int} · scheme %{Sexp.to_string [%sexp \
+           (Config.control_scheme : Config.Control_scheme.t)]}"]
+      ]
   in
-  let lines =
-    [ [%string
-        "x %{Float.round_nearest bird.x#Float} / %{Float.round_nearest \
-         w.course.finish_x#Float}"]
-    ; [%string "y %{Float.round_nearest bird.y#Float}"]
-    ; [%string "vy %{Float.round_nearest bird.vy#Float}"]
-    ; [%string "speed %{Float.round_nearest bird.speed#Float}"]
-    ; [%string "state %{state}"]
-    ; [%string "crashes %{w.crashes#Int}"]
-    ; [%string "time %{seconds w.elapsed}"]
-    ; [%string
-        "seed %{w.seed#Int} · scheme %{Sexp.to_string [%sexp \
-         (Config.control_scheme : Config.Control_scheme.t)]}"]
+  let net_lines =
+    [ [%string "net %{Net.status_line ()}"]
+    ; (match Net.ms_since_opponent_update () with
+       | None -> "opp no update yet"
+       | Some ms -> [%string "opp update %{ms#Int}ms ago"])
     ]
   in
   ctx##.font := Js.string "12px monospace";
   ctx##.fillStyle := Js.string "#e6edf3";
-  List.iteri lines ~f:(fun i line ->
+  List.iteri (world_lines @ net_lines) ~f:(fun i line ->
     ctx##fillText
       (Js.string line)
       (n 8.)
-      (n (16. +. (Float.of_int i *. 14.))))
+      (n (26. +. (Float.of_int i *. 14.))))
 ;;
 
-(* The pre-race countdown: big centered digits (5..4..3..2..1), plus GO! for
-   the first moments of racing. *)
+(* The pre-race countdown: big centered digits, plus GO! at the start. *)
 let draw_countdown ctx ~time_left =
   fill_text
     ctx
@@ -183,9 +253,40 @@ let draw_win_screen ctx ~time ~crashes =
     ctx
     ~color:"#8b949e"
     ~font:"14px monospace"
-    ~x:(center_x -. 130.)
+    ~x:(center_x -. 155.)
     ~y:((Config.canvas_height /. 2.) +. 48.)
-    "press R to start a new race"
+    "press R to start a new race (both players)"
+;;
+
+let draw_lobby ctx =
+  fill_rect
+    ctx
+    ~color:"#0d1117"
+    ~x:0.
+    ~y:0.
+    ~w:Config.canvas_width
+    ~h:Config.canvas_height;
+  fill_rect
+    ctx
+    ~color:"#8b5a2b"
+    ~x:0.
+    ~y:Course.ground_top
+    ~w:Config.canvas_width
+    ~h:Config.ground_height;
+  fill_text
+    ctx
+    ~color:"#e6edf3"
+    ~font:"bold 24px monospace"
+    ~x:((Config.canvas_width /. 2.) -. 220.)
+    ~y:((Config.canvas_height /. 2.) -. 10.)
+    "MULTIPLAYER FLAPPY RACER";
+  fill_text
+    ctx
+    ~color:"#8b949e"
+    ~font:"16px monospace"
+    ~x:((Config.canvas_width /. 2.) -. 220.)
+    ~y:((Config.canvas_height /. 2.) +. 24.)
+    (Net.status_line ())
 ;;
 
 (* Flash the bird during i-frames: a ~7 Hz blink driven by the remaining
@@ -195,6 +296,126 @@ let invuln_blink_off ~invuln_left =
   && Float.( < ) (Float.mod_float invuln_left 0.15) 0.06
 ;;
 
+(* Progress bar across the top: both birds' positions along the full course —
+   essential, not polish (context doc §1). *)
+let draw_progress_bar ctx (w : World.t) =
+  let track_x = 20. in
+  let track_w = Config.canvas_width -. (2. *. track_x) in
+  let frac x = Float.clamp_exn (x /. w.course.finish_x) ~min:0. ~max:1. in
+  fill_rect ctx ~color:"#30363d" ~x:track_x ~y:8. ~w:track_w ~h:6.;
+  (match !ghost with
+   | None -> ()
+   | Some g ->
+     with_alpha ctx 0.7 ~f:(fun () ->
+       fill_rect
+         ctx
+         ~color:"#f778ba"
+         ~x:(track_x +. (frac g.x *. track_w) -. 4.)
+         ~y:5.
+         ~w:8.
+         ~h:12.));
+  fill_rect
+    ctx
+    ~color:"#f0c649"
+    ~x:(track_x +. (frac w.bird.x *. track_w) -. 4.)
+    ~y:5.
+    ~w:8.
+    ~h:12.
+;;
+
+(* The opponent: a 55%-opacity square at its eased position when on screen;
+   otherwise a small edge marker with the distance, so the opponent is always
+   perceivable (context doc §1). *)
+let draw_ghost ctx (w : World.t) ~offset =
+  match !ghost with
+  | None -> ()
+  | Some g ->
+    let sx = g.x -. offset in
+    if Float.( > ) (sx +. Config.bird_size) 0.
+       && Float.( < ) sx Config.canvas_width
+    then
+      with_alpha ctx 0.55 ~f:(fun () ->
+        fill_rect
+          ctx
+          ~color:"#f778ba"
+          ~x:sx
+          ~y:g.y
+          ~w:Config.bird_size
+          ~h:Config.bird_size)
+    else (
+      let ahead = Float.( > ) g.x w.bird.x in
+      let ex = if ahead then Config.canvas_width -. 26. else 14. in
+      let ey =
+        Float.clamp_exn g.y ~min:24. ~max:(Course.ground_top -. 12.)
+      in
+      let dist =
+        Float.to_int (Float.round_nearest (Float.abs (g.x -. w.bird.x)))
+      in
+      with_alpha ctx 0.8 ~f:(fun () ->
+        fill_rect ctx ~color:"#f778ba" ~x:ex ~y:ey ~w:12. ~h:12.);
+      fill_text
+        ctx
+        ~color:"#f778ba"
+        ~font:"12px monospace"
+        ~x:(if ahead then ex -. 60. else ex +. 16.)
+        ~y:(ey +. 10.)
+        [%string "%{dist#Int}px"])
+;;
+
+let draw_race ctx (w : World.t) =
+  let bird = w.bird in
+  (* Camera: bird fixed at [bird_screen_x]; the world slides past. *)
+  let offset = bird.x -. Config.bird_screen_x in
+  fill_rect
+    ctx
+    ~color:"#0d1117"
+    ~x:0.
+    ~y:0.
+    ~w:Config.canvas_width
+    ~h:Config.canvas_height;
+  (* Ground. *)
+  fill_rect
+    ctx
+    ~color:"#8b5a2b"
+    ~x:0.
+    ~y:Course.ground_top
+    ~w:Config.canvas_width
+    ~h:Config.ground_height;
+  (* Pipes: only those overlapping the camera window. *)
+  List.iter w.course.rects ~f:(fun { Course.Rect.x; y; w = rw; h } ->
+    let sx = x -. offset in
+    if Float.( > ) (sx +. rw) 0. && Float.( < ) sx Config.canvas_width
+    then fill_rect ctx ~color:"#3fb950" ~x:sx ~y ~w:rw ~h);
+  (* Finish line: checkered post from ceiling to ground. *)
+  let finish_sx = w.course.finish_x -. offset in
+  if Float.( > ) (finish_sx +. 24.) 0.
+     && Float.( < ) finish_sx Config.canvas_width
+  then draw_finish_post ctx ~sx:finish_sx;
+  (* The opponent first, so our own bird draws on top when overlapping. *)
+  draw_ghost ctx w ~offset;
+  (* The bird: yellow racing, red dead, blinking during i-frames. *)
+  let color =
+    match w.phase with
+    | Countdown _ | Racing | Finished _ -> "#f0c649"
+    | Dead _ -> "#f85149"
+  in
+  if not (invuln_blink_off ~invuln_left:w.invuln_left)
+  then
+    fill_rect
+      ctx
+      ~color
+      ~x:Config.bird_screen_x
+      ~y:bird.y
+      ~w:Config.bird_size
+      ~h:Config.bird_size;
+  draw_progress_bar ctx w;
+  match w.phase with
+  | Countdown { time_left } -> draw_countdown ctx ~time_left
+  | Racing when Float.( < ) w.elapsed 0.7 -> draw_go ctx
+  | Finished { time } -> draw_win_screen ctx ~time ~crashes:w.crashes
+  | Racing | Dead _ -> ()
+;;
+
 let render () =
   match
     Dom_html.getElementById_coerce canvas_id Dom_html.CoerceTo.canvas
@@ -202,56 +423,8 @@ let render () =
   | None -> () (* Bonsai hasn't mounted the canvas yet; skip this frame. *)
   | Some canvas ->
     let ctx = canvas##getContext Dom_html._2d_ in
-    let w = !world in
-    let bird = w.bird in
-    (* Camera: bird fixed at [bird_screen_x]; the world slides past. *)
-    let offset = bird.x -. Config.bird_screen_x in
-    fill_rect
-      ctx
-      ~color:"#0d1117"
-      ~x:0.
-      ~y:0.
-      ~w:Config.canvas_width
-      ~h:Config.canvas_height;
-    (* Ground. *)
-    fill_rect
-      ctx
-      ~color:"#8b5a2b"
-      ~x:0.
-      ~y:Course.ground_top
-      ~w:Config.canvas_width
-      ~h:Config.ground_height;
-    (* Pipes: only those overlapping the camera window. *)
-    List.iter w.course.rects ~f:(fun { Course.Rect.x; y; w = rw; h } ->
-      let sx = x -. offset in
-      if Float.( > ) (sx +. rw) 0. && Float.( < ) sx Config.canvas_width
-      then fill_rect ctx ~color:"#3fb950" ~x:sx ~y ~w:rw ~h);
-    (* Finish line: checkered post from ceiling to ground. *)
-    let finish_sx = w.course.finish_x -. offset in
-    if Float.( > ) (finish_sx +. 24.) 0.
-       && Float.( < ) finish_sx Config.canvas_width
-    then draw_finish_post ctx ~sx:finish_sx;
-    (* The bird: yellow racing, red dead, blinking during i-frames. *)
-    let color =
-      match w.phase with
-      | Countdown _ | Racing | Finished _ -> "#f0c649"
-      | Dead _ -> "#f85149"
-    in
-    if not (invuln_blink_off ~invuln_left:w.invuln_left)
-    then
-      fill_rect
-        ctx
-        ~color
-        ~x:Config.bird_screen_x
-        ~y:bird.y
-        ~w:Config.bird_size
-        ~h:Config.bird_size;
-    (match w.phase with
-     | Countdown { time_left } -> draw_countdown ctx ~time_left
-     | Racing when Float.( < ) w.elapsed 0.7 -> draw_go ctx
-     | Finished { time } -> draw_win_screen ctx ~time ~crashes:w.crashes
-     | Racing | Dead _ -> ());
-    if !show_overlay then draw_overlay ctx w
+    (match !world with None -> draw_lobby ctx | Some w -> draw_race ctx w);
+    if !show_overlay then draw_overlay ctx !world
 ;;
 
 (* --- The loop: fixed-timestep simulation, render once per frame. --- *)
@@ -261,17 +434,25 @@ let start () =
   let last_ms = ref None in
   let accumulator = ref 0. in
   let rec frame now_ms =
+    track_race_state ();
     (match !last_ms with
      | None -> ()
      | Some last ->
        (* Clamp so a backgrounded tab doesn't fast-forward on return. *)
        let elapsed = Float.min ((now_ms -. last) /. 1000.) 0.1 in
-       accumulator := !accumulator +. elapsed;
-       while Float.( >= ) !accumulator Config.sim_dt do
-         world
-         := World.step !world ~dt:Config.sim_dt ~speed_input:(speed_input ());
-         accumulator := !accumulator -. Config.sim_dt
-       done);
+       (match !world with
+        | None -> accumulator := 0.
+        | Some w ->
+          accumulator := !accumulator +. elapsed;
+          let w = ref w in
+          while Float.( >= ) !accumulator Config.sim_dt do
+            w
+            := World.step !w ~dt:Config.sim_dt ~speed_input:(speed_input ());
+            accumulator := !accumulator -. Config.sim_dt
+          done;
+          world := Some !w;
+          publish_my_pos !w);
+       update_ghost ~dt:elapsed);
     last_ms := Some now_ms;
     render ();
     request_frame ()

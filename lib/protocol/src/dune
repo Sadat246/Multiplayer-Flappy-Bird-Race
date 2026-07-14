@@ -1,0 +1,5 @@
+(library
+ (name flappy_protocol)
+ (libraries core async_rpc_kernel)
+ (preprocess
+  (pps ppx_jane)))

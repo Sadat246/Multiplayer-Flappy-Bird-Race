@@ -1,5 +1,15 @@
 (library
  (name flappy_client)
- (libraries core bonsai bonsai_web virtual_dom js_of_ocaml flappy_game)
+ (libraries
+  core
+  async_kernel
+  async_js
+  async_rpc_kernel
+  bonsai
+  bonsai_web
+  virtual_dom
+  js_of_ocaml
+  flappy_game
+  flappy_protocol)
  (preprocess
   (pps ppx_jane bonsai.ppx_bonsai ppx_html js_of_ocaml-ppx)))

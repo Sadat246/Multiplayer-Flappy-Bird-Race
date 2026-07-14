@@ -52,3 +52,4 @@ let countdown_duration = 5.0
 let respawn_pause = 2.0
 let invuln_duration = 1.5
 let sim_dt = 1. /. 120.
+let sync_hz = 25.
