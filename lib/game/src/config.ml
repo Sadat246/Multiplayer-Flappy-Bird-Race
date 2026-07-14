@@ -27,7 +27,7 @@ let cruise_speed = speed_initial
 (* Full brake-to-floor or floor-to-cap ramp takes (cap - floor) / accel_rate
    ~= 0.4s, per the context doc's "short acceleration ramps". *)
 let accel_rate = 575.
-let cruise_decay_rate = 250.
+let cruise_decay_rate = 200.
 let pipe_width = 80.
 let pipe_gap = 190.
 let course_pipes = 30
